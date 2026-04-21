@@ -409,21 +409,73 @@ jobs:
             -auto-approve \
             tfplan.binary 2>&1 | tee apply_output.txt
 
+      - name: Resolve cluster name from Terraform output
+        id: cluster
+        run: |
+          CLUSTER_NAME=$(terraform -chdir=terraform/environments/staging output -raw cluster_name 2>/dev/null || true)
+          if [[ -z "$CLUSTER_NAME" ]] || [[ "$CLUSTER_NAME" == "null" ]]; then
+            echo "ERROR: Could not resolve cluster_name from Terraform outputs"
+            terraform -chdir=terraform/environments/staging output || true
+            exit 1
+          fi
+          echo "name=$CLUSTER_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Guard AWS account/region and cluster existence
+        run: |
+          ACTUAL_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          if [[ "$ACTUAL_ACCOUNT_ID" != "${{ secrets.AWS_ACCOUNT_ID }}" ]]; then
+            echo "ERROR: OIDC account mismatch. expected=${{ secrets.AWS_ACCOUNT_ID }} actual=$ACTUAL_ACCOUNT_ID"
+            exit 1
+          fi
+
+          aws eks describe-cluster \
+            --region "${{ env.AWS_REGION }}" \
+            --name "${{ steps.cluster.outputs.name }}" >/dev/null
+
+      - name: Detect Kubernetes API reachability
+        id: kube_api
+        run: |
+          ENDPOINT=$(aws eks describe-cluster \
+            --region "${{ env.AWS_REGION }}" \
+            --name "${{ steps.cluster.outputs.name }}" \
+            --query 'cluster.endpoint' \
+            --output text)
+          PUBLIC_ACCESS=$(aws eks describe-cluster \
+            --region "${{ env.AWS_REGION }}" \
+            --name "${{ steps.cluster.outputs.name }}" \
+            --query 'cluster.resourcesVpcConfig.endpointPublicAccess' \
+            --output text)
+
+          HOST=${ENDPOINT#https://}
+          if timeout 8 bash -c "cat < /dev/null > /dev/tcp/${HOST}/443"; then
+            echo "reachable=true" >> "$GITHUB_OUTPUT"
+            echo "Kubernetes API endpoint is reachable from this runner."
+          else
+            echo "reachable=false" >> "$GITHUB_OUTPUT"
+            echo "Kubernetes API endpoint is NOT reachable from this runner (likely private endpoint/network path restriction)."
+          fi
+
+          echo "public_access=$PUBLIC_ACCESS" >> "$GITHUB_OUTPUT"
+          echo "endpoint=$ENDPOINT" >> "$GITHUB_OUTPUT"
+
       - name: Update kubeconfig
+        if: steps.kube_api.outputs.reachable == 'true'
         run: |
           aws eks update-kubeconfig \
             --region ${{ env.AWS_REGION }} \
-            --name eks-platform-staging
+            --name ${{ steps.cluster.outputs.name }}
 
       - name: Run K8s Health Check
         id: healthcheck
+        if: steps.kube_api.outputs.reachable == 'true'
         run: |
           chmod +x scripts/k8s-healthcheck.sh
-          scripts/k8s-healthcheck.sh eks-platform-staging ${{ env.AWS_REGION }} 2>&1 | tee healthcheck_output.txt
+          scripts/k8s-healthcheck.sh ${{ steps.cluster.outputs.name }} ${{ env.AWS_REGION }} 2>&1 | tee healthcheck_output.txt
         continue-on-error: false
 
       - name: Validate Cluster Autoscaler
         id: autoscaler
+        if: steps.kube_api.outputs.reachable == 'true'
         run: |
           echo "Checking cluster autoscaler..."
           kubectl wait --for=condition=available \
@@ -440,6 +492,7 @@ jobs:
 
       - name: Validate DNS Resolution
         id: dns
+        if: steps.kube_api.outputs.reachable == 'true'
         run: |
           echo "Checking CoreDNS..."
           kubectl wait --for=condition=available deployment/coredns -n kube-system --timeout=120s
@@ -450,6 +503,7 @@ jobs:
 
       - name: Validate Ingress Controller
         id: ingress
+        if: steps.kube_api.outputs.reachable == 'true'
         run: |
           echo "Checking AWS Load Balancer Controller..."
           kubectl wait --for=condition=available \
@@ -467,9 +521,76 @@ jobs:
 
       - name: Validate Metrics Server
         id: metrics
+        if: steps.kube_api.outputs.reachable == 'true'
         run: |
           kubectl wait --for=condition=available deployment/metrics-server -n kube-system --timeout=120s
           kubectl top nodes || (echo "metrics-server not ready yet, giving 30s..."; sleep 30; kubectl top nodes)
+
+      - name: Validate Cluster via AWS API (private endpoint fallback)
+        id: private_validation
+        if: steps.kube_api.outputs.reachable != 'true'
+        run: |
+          echo "Running fallback validation because Kubernetes API is unreachable from this runner."
+          echo "Endpoint: ${{ steps.kube_api.outputs.endpoint }}"
+          echo "Endpoint public access: ${{ steps.kube_api.outputs.public_access }}"
+
+          CLUSTER_STATUS=$(aws eks describe-cluster \
+            --region "${{ env.AWS_REGION }}" \
+            --name "${{ steps.cluster.outputs.name }}" \
+            --query 'cluster.status' \
+            --output text)
+
+          if [[ "$CLUSTER_STATUS" != "ACTIVE" ]]; then
+            echo "FATAL: Cluster is not ACTIVE (status=$CLUSTER_STATUS)"
+            exit 1
+          fi
+
+          NODEGROUPS=$(aws eks list-nodegroups \
+            --region "${{ env.AWS_REGION }}" \
+            --cluster-name "${{ steps.cluster.outputs.name }}" \
+            --query 'nodegroups' \
+            --output text)
+
+          if [[ -z "$NODEGROUPS" ]]; then
+            echo "FATAL: No node groups found in staging cluster"
+            exit 1
+          fi
+
+          for ng in $NODEGROUPS; do
+            NG_STATUS=$(aws eks describe-nodegroup \
+              --region "${{ env.AWS_REGION }}" \
+              --cluster-name "${{ steps.cluster.outputs.name }}" \
+              --nodegroup-name "$ng" \
+              --query 'nodegroup.status' \
+              --output text)
+            if [[ "$NG_STATUS" != "ACTIVE" ]]; then
+              echo "FATAL: Node group $ng is not ACTIVE (status=$NG_STATUS)"
+              exit 1
+            fi
+          done
+
+          ADDONS=$(aws eks list-addons \
+            --region "${{ env.AWS_REGION }}" \
+            --cluster-name "${{ steps.cluster.outputs.name }}" \
+            --query 'addons' \
+            --output text)
+
+          if [[ -n "$ADDONS" ]]; then
+            for addon in $ADDONS; do
+              ADDON_STATUS=$(aws eks describe-addon \
+                --region "${{ env.AWS_REGION }}" \
+                --cluster-name "${{ steps.cluster.outputs.name }}" \
+                --addon-name "$addon" \
+                --query 'addon.status' \
+                --output text)
+              if [[ "$ADDON_STATUS" != "ACTIVE" ]]; then
+                echo "FATAL: Add-on $addon is not ACTIVE (status=$ADDON_STATUS)"
+                exit 1
+              fi
+            done
+          fi
+
+          echo "Fallback validation passed (cluster, nodegroups, and managed add-ons are ACTIVE)."
 
       - name: Validation Agent
         id: agent
@@ -483,26 +604,38 @@ jobs:
         if: always()
         run: |
           STATUS="success"
-          for outcome in \
-            "${{ steps.apply.outcome }}" \
-            "${{ steps.healthcheck.outcome }}" \
-            "${{ steps.autoscaler.outcome }}" \
-            "${{ steps.dns.outcome }}" \
-            "${{ steps.ingress.outcome }}" \
-            "${{ steps.metrics.outcome }}" \
-            "${{ steps.agent.outcome }}"; do
-            if [[ "$outcome" != "success" ]]; then
-              STATUS="failure"
-              break
-            fi
-          done
+          if [[ "${{ steps.kube_api.outputs.reachable }}" == "true" ]]; then
+            for outcome in \
+              "${{ steps.apply.outcome }}" \
+              "${{ steps.healthcheck.outcome }}" \
+              "${{ steps.autoscaler.outcome }}" \
+              "${{ steps.dns.outcome }}" \
+              "${{ steps.ingress.outcome }}" \
+              "${{ steps.metrics.outcome }}" \
+              "${{ steps.agent.outcome }}"; do
+              if [[ "$outcome" != "success" ]]; then
+                STATUS="failure"
+                break
+              fi
+            done
+          else
+            for outcome in \
+              "${{ steps.apply.outcome }}" \
+              "${{ steps.private_validation.outcome }}" \
+              "${{ steps.agent.outcome }}"; do
+              if [[ "$outcome" != "success" ]]; then
+                STATUS="failure"
+                break
+              fi
+            done
+          fi
 
           mkdir -p artifacts
           cat > artifacts/agent-output.json << EOF
           {
             "stage": "staging",
             "status": "$STATUS",
-            "reason": "apply=${{ steps.apply.outcome }}, healthcheck=${{ steps.healthcheck.outcome }}, autoscaler=${{ steps.autoscaler.outcome }}, dns=${{ steps.dns.outcome }}, ingress=${{ steps.ingress.outcome }}, agent=${{ steps.agent.outcome }}",
+            "reason": "apply=${{ steps.apply.outcome }}, kube_api_reachable=${{ steps.kube_api.outputs.reachable }}, healthcheck=${{ steps.healthcheck.outcome }}, autoscaler=${{ steps.autoscaler.outcome }}, dns=${{ steps.dns.outcome }}, ingress=${{ steps.ingress.outcome }}, metrics=${{ steps.metrics.outcome }}, private_validation=${{ steps.private_validation.outcome }}, agent=${{ steps.agent.outcome }}",
             "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "commit": "${{ github.sha }}",
             "actor": "${{ github.actor }}",
