@@ -264,6 +264,7 @@ jobs:
           echo "apply_exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
 
       - name: Terraform Apply (test) - No Changes
+        id: apply_no_changes
         if: steps.plan.outputs.exit_code == '0'
         run: |
           echo "No infrastructure changes detected (plan exit code 0). Skipping apply."
@@ -318,9 +319,19 @@ jobs:
         if: always()
         run: |
           STATUS="success"
+          APPLY_STATUS="failure"
+
+          if [[ "${{ steps.plan.outputs.exit_code }}" == "2" ]] && [[ "${{ steps.apply.outcome }}" == "success" ]]; then
+            APPLY_STATUS="success"
+          fi
+
+          if [[ "${{ steps.plan.outputs.exit_code }}" == "0" ]] && [[ "${{ steps.apply_no_changes.outcome }}" == "success" ]]; then
+            APPLY_STATUS="success"
+          fi
+
           if [[ "${{ steps.tfsec.outcome }}" != "success" ]] || \
              [[ "${{ steps.checkov.outcome }}" != "success" ]] || \
-             [[ "${{ steps.apply.outcome }}" != "success" ]] || \
+             [[ "$APPLY_STATUS" != "success" ]] || \
              [[ "${{ steps.healthcheck.outcome }}" != "success" ]] || \
              [[ "${{ steps.agent.outcome }}" != "success" ]]; then
             STATUS="failure"
@@ -331,7 +342,7 @@ jobs:
           {
             "stage": "test",
             "status": "$STATUS",
-            "reason": "tfsec=${{ steps.tfsec.outcome }}, checkov=${{ steps.checkov.outcome }}, apply=${{ steps.apply.outcome }}, healthcheck=${{ steps.healthcheck.outcome }}, agent=${{ steps.agent.outcome }}",
+              "reason": "tfsec=${{ steps.tfsec.outcome }}, checkov=${{ steps.checkov.outcome }}, plan_exit_code=${{ steps.plan.outputs.exit_code }}, apply=${{ steps.apply.outcome }}, apply_no_changes=${{ steps.apply_no_changes.outcome }}, apply_effective=$APPLY_STATUS, healthcheck=${{ steps.healthcheck.outcome }}, agent=${{ steps.agent.outcome }}",
             "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "commit": "${{ github.sha }}",
             "actor": "${{ github.actor }}",
