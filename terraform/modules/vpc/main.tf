@@ -142,6 +142,8 @@ resource "aws_iam_role" "flow_logs" {
 }
 
 resource "aws_iam_role_policy" "flow_logs" {
+  #tfsec:ignore:aws-iam-no-policy-wildcards:exp:2027-04-21
+  # CloudWatch Logs stream APIs require ARN suffix wildcard (log-group-arn:*).
   name = "${var.name}-vpc-flow-logs"
   role = aws_iam_role.flow_logs.id
 

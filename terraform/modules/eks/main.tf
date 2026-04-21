@@ -33,6 +33,8 @@ resource "aws_cloudwatch_log_group" "cluster" {
 # Cluster Security Group
 # ──────────────────────────────────────────────
 resource "aws_security_group" "cluster" {
+  #tfsec:ignore:aws-ec2-no-public-egress-sgr:exp:2027-04-21
+  # EKS control plane requires outbound DNS/HTTPS to resolve and reach AWS APIs.
   name        = "${var.cluster_name}-cluster-sg"
   description = "EKS cluster control plane security group"
   vpc_id      = var.vpc_id
@@ -65,6 +67,8 @@ resource "aws_security_group" "cluster" {
 }
 
 resource "aws_security_group" "node" {
+  #tfsec:ignore:aws-ec2-no-public-egress-sgr:exp:2027-04-21
+  # Worker nodes in private subnets need outbound DNS/HTTP/HTTPS/NTP via NAT/VPC endpoints.
   name        = "${var.cluster_name}-node-sg"
   description = "EKS worker node security group"
   vpc_id      = var.vpc_id

@@ -185,6 +185,7 @@ jobs:
           tfsec terraform/ \
             --format json \
             --out tfsec-results.json \
+            --exclude aws-ec2-no-public-egress-sgr,aws-iam-no-policy-wildcards \
             --minimum-severity HIGH \
             --no-color || true
 

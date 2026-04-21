@@ -165,6 +165,8 @@ resource "aws_iam_role" "lbc" {
 }
 
 resource "aws_iam_policy" "lbc" {
+  #tfsec:ignore:aws-iam-no-policy-wildcards:exp:2027-04-21
+  # AWS Load Balancer Controller requires wildcard actions/resources; scope is constrained by IRSA and tag conditions.
   name        = "${var.cluster_name}-aws-lbc-policy"
   description = "IAM policy for AWS Load Balancer Controller"
 
@@ -412,6 +414,8 @@ resource "aws_iam_role" "cluster_autoscaler" {
 }
 
 resource "aws_iam_policy" "cluster_autoscaler" {
+  #tfsec:ignore:aws-iam-no-policy-wildcards:exp:2027-04-21
+  # Cluster Autoscaler uses read/list APIs that do not support strict resource scoping; write APIs are tag-restricted.
   name        = "${var.cluster_name}-cluster-autoscaler-policy"
   description = "IAM policy for Cluster Autoscaler"
 
