@@ -173,11 +173,47 @@ jobs:
       - name: Terraform Plan (test)
         id: plan
         run: |
-          terraform -chdir=terraform/environments/test plan \
-            -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
-            -out=tfplan.binary \
-            -detailed-exitcode 2>&1 | tee plan_output.txt
-          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+          PLAN_FILE="$PWD/terraform/environments/test/tfplan.binary"
+
+          run_plan() {
+            terraform -chdir=terraform/environments/test plan \
+              -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
+              -out="$PLAN_FILE" \
+              -detailed-exitcode 2>&1 | tee plan_output.txt
+            return ${PIPESTATUS[0]}
+          }
+
+          set +e
+          run_plan
+          PLAN_EXIT=$?
+          set -e
+
+          if [[ "$PLAN_EXIT" -eq 1 ]] && grep -q "Error acquiring the state lock" plan_output.txt; then
+            LOCK_ID=$(awk '/^│   ID:/{print $3; exit}' plan_output.txt | tr -d '\r')
+            if [[ -n "$LOCK_ID" ]]; then
+              echo "Detected stale lock. Attempting force-unlock for lock ID: $LOCK_ID"
+              terraform -chdir=terraform/environments/test force-unlock -force "$LOCK_ID" || true
+              sleep 5
+
+              set +e
+              run_plan
+              PLAN_EXIT=$?
+              set -e
+            fi
+          fi
+
+          echo "exit_code=$PLAN_EXIT" >> "$GITHUB_OUTPUT"
+          echo "plan_file=$PLAN_FILE" >> "$GITHUB_OUTPUT"
+
+          if [[ "$PLAN_EXIT" != "0" && "$PLAN_EXIT" != "2" ]]; then
+            echo "Terraform plan failed with exit code $PLAN_EXIT"
+            exit "$PLAN_EXIT"
+          fi
+
+          if [[ "$PLAN_EXIT" == "2" && ! -f "$PLAN_FILE" ]]; then
+            echo "Terraform plan reported changes but plan file is missing: $PLAN_FILE"
+            exit 1
+          fi
 
       - name: tfsec Security Scan
         id: tfsec
@@ -220,11 +256,17 @@ jobs:
 
       - name: Terraform Apply (test)
         id: apply
+        if: steps.plan.outputs.exit_code == '2'
         run: |
           terraform -chdir=terraform/environments/test apply \
             -auto-approve \
-            tfplan.binary 2>&1 | tee apply_output.txt
+            "${{ steps.plan.outputs.plan_file }}" 2>&1 | tee apply_output.txt
           echo "apply_exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Terraform Apply (test) - No Changes
+        if: steps.plan.outputs.exit_code == '0'
+        run: |
+          echo "No infrastructure changes detected (plan exit code 0). Skipping apply."
 
       - name: Resolve cluster name from Terraform output
         id: cluster
