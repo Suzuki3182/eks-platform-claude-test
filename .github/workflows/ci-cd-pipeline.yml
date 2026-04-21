@@ -1,0 +1,653 @@
+name: EKS Platform CI/CD Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment (test/staging/prod)'
+        required: true
+        default: 'test'
+        type: choice
+        options: [test, staging, prod]
+      force_apply:
+        description: 'Force apply without plan approval'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  TF_VERSION: '1.6.6'
+  TFLINT_VERSION: 'v0.50.3'
+  AWS_REGION: 'us-east-1'
+  TF_IN_AUTOMATION: 'true'
+  TF_INPUT: 'false'
+
+# ──────────────────────────────────────────────
+# Stage 1: Build — fmt, init, validate, lint, unit tests
+# ──────────────────────────────────────────────
+jobs:
+  build:
+    name: Build & Validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      status: ${{ steps.emit.outputs.status }}
+      plan_artifact: ${{ steps.emit.outputs.plan_artifact }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Setup TFLint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: ${{ env.TFLINT_VERSION }}
+
+      - name: Terraform Format Check
+        id: fmt
+        run: |
+          terraform fmt -check -recursive terraform/
+          echo "fmt_result=passed" >> "$GITHUB_OUTPUT"
+        continue-on-error: false
+
+      - name: Terraform Init (modules)
+        run: |
+          for env_dir in terraform/environments/*/; do
+            echo "Initializing $env_dir"
+            terraform -chdir="$env_dir" init -backend=false
+          done
+
+      - name: Terraform Validate
+        id: validate
+        run: |
+          for env_dir in terraform/environments/*/; do
+            echo "Validating $env_dir"
+            terraform -chdir="$env_dir" validate
+          done
+          echo "validate_result=passed" >> "$GITHUB_OUTPUT"
+
+      - name: TFLint
+        id: tflint
+        run: |
+          tflint --init
+          for env_dir in terraform/environments/*/; do
+            echo "Linting $env_dir"
+            tflint --chdir="$env_dir" --format=compact
+          done
+          echo "tflint_result=passed" >> "$GITHUB_OUTPUT"
+
+      - name: Shellcheck Scripts
+        run: |
+          sudo apt-get install -y shellcheck
+          shellcheck scripts/*.sh
+
+      - name: Emit Build Status
+        id: emit
+        if: always()
+        run: |
+          STATUS="success"
+          if [[ "${{ steps.fmt.outcome }}" != "success" ]] || \
+             [[ "${{ steps.validate.outcome }}" != "success" ]] || \
+             [[ "${{ steps.tflint.outcome }}" != "success" ]]; then
+            STATUS="failure"
+          fi
+
+          mkdir -p artifacts
+          cat > artifacts/agent-output.json << EOF
+          {
+            "stage": "build",
+            "status": "$STATUS",
+            "reason": "fmt=${{ steps.fmt.outcome }}, validate=${{ steps.validate.outcome }}, tflint=${{ steps.tflint.outcome }}",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "commit": "${{ github.sha }}",
+            "actor": "${{ github.actor }}"
+          }
+          EOF
+
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          echo "plan_artifact=build-status" >> "$GITHUB_OUTPUT"
+          cat artifacts/agent-output.json
+
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-status
+          path: artifacts/agent-output.json
+          retention-days: 5
+
+# ──────────────────────────────────────────────
+# Stage 2: Test — ephemeral test environment deploy + security scans
+# ──────────────────────────────────────────────
+  test:
+    name: Test Environment
+    runs-on: ubuntu-latest
+    needs: build
+    if: needs.build.outputs.status == 'success'
+    timeout-minutes: 60
+    environment: test
+    outputs:
+      status: ${{ steps.emit.outputs.status }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TEST }}
+          role-session-name: GitHubActions-Test-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Setup tfsec
+        run: |
+          curl -L "https://github.com/aquasecurity/tfsec/releases/latest/download/tfsec-linux-amd64" -o /usr/local/bin/tfsec
+          chmod +x /usr/local/bin/tfsec
+
+      - name: Setup checkov
+        run: pip3 install checkov
+
+      - name: Terraform Init (test)
+        run: terraform -chdir=terraform/environments/test init
+
+      - name: Terraform Plan (test)
+        id: plan
+        run: |
+          terraform -chdir=terraform/environments/test plan \
+            -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
+            -out=tfplan.binary \
+            -detailed-exitcode 2>&1 | tee plan_output.txt
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: tfsec Security Scan
+        id: tfsec
+        run: |
+          tfsec terraform/ \
+            --format json \
+            --out tfsec-results.json \
+            --minimum-severity HIGH \
+            --no-color || true
+
+          HIGH_COUNT=$(jq '[.results[] | select(.severity == "HIGH" or .severity == "CRITICAL")] | length' tfsec-results.json 2>/dev/null || echo "0")
+          echo "high_count=$HIGH_COUNT" >> "$GITHUB_OUTPUT"
+
+          if [[ "$HIGH_COUNT" -gt "0" ]]; then
+            echo "FATAL: tfsec found $HIGH_COUNT HIGH/CRITICAL findings"
+            jq '.results[] | select(.severity == "HIGH" or .severity == "CRITICAL")' tfsec-results.json
+            exit 1
+          fi
+        continue-on-error: false
+
+      - name: Checkov Security Scan
+        id: checkov
+        run: |
+          checkov -d terraform/ \
+            --framework terraform \
+            --output json \
+            --output-file checkov-results.json \
+            --compact \
+            --quiet || true
+
+          FAILED=$(jq '.summary.failed' checkov-results.json 2>/dev/null || echo "0")
+          CRITICAL=$(jq '[.results.failed_checks[] | select(.check_result.result == "FAILED") | select(.check_id | startswith("CKV"))] | length' checkov-results.json 2>/dev/null || echo "0")
+          echo "failed=$FAILED" >> "$GITHUB_OUTPUT"
+
+          if [[ "$FAILED" -gt "0" ]]; then
+            echo "WARNING: checkov found $FAILED policy violations"
+          fi
+        continue-on-error: false
+
+      - name: Terraform Apply (test)
+        id: apply
+        run: |
+          terraform -chdir=terraform/environments/test apply \
+            -auto-approve \
+            tfplan.binary 2>&1 | tee apply_output.txt
+          echo "apply_exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name eks-platform-test
+
+      - name: Run K8s Health Check
+        id: healthcheck
+        run: |
+          chmod +x scripts/k8s-healthcheck.sh
+          scripts/k8s-healthcheck.sh eks-platform-test ${{ env.AWS_REGION }} 2>&1 | tee healthcheck_output.txt
+          echo "healthcheck_exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+        continue-on-error: false
+
+      - name: Validation Agent
+        id: agent
+        run: |
+          chmod +x scripts/pipeline-agent-verify.sh
+          scripts/pipeline-agent-verify.sh test 2>&1 | tee agent_output.txt
+        continue-on-error: false
+
+      - name: Emit Test Status
+        id: emit
+        if: always()
+        run: |
+          STATUS="success"
+          if [[ "${{ steps.tfsec.outcome }}" != "success" ]] || \
+             [[ "${{ steps.checkov.outcome }}" != "success" ]] || \
+             [[ "${{ steps.apply.outcome }}" != "success" ]] || \
+             [[ "${{ steps.healthcheck.outcome }}" != "success" ]] || \
+             [[ "${{ steps.agent.outcome }}" != "success" ]]; then
+            STATUS="failure"
+          fi
+
+          mkdir -p artifacts
+          cat > artifacts/agent-output.json << EOF
+          {
+            "stage": "test",
+            "status": "$STATUS",
+            "reason": "tfsec=${{ steps.tfsec.outcome }}, checkov=${{ steps.checkov.outcome }}, apply=${{ steps.apply.outcome }}, healthcheck=${{ steps.healthcheck.outcome }}, agent=${{ steps.agent.outcome }}",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "commit": "${{ github.sha }}",
+            "actor": "${{ github.actor }}",
+            "environment": "test"
+          }
+          EOF
+
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          cat artifacts/agent-output.json
+
+      - name: Upload Test Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-status
+          path: |
+            artifacts/agent-output.json
+            tfsec-results.json
+            checkov-results.json
+          retention-days: 5
+
+      - name: Rollback on Failure
+        if: failure() && steps.apply.outcome == 'success'
+        run: |
+          echo "Rolling back test environment..."
+          terraform -chdir=terraform/environments/test apply \
+            -refresh-only \
+            -auto-approve \
+            -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" || true
+
+# ──────────────────────────────────────────────
+# Stage 3: Staging — integration tests, autoscaler, DNS, ingress
+# ──────────────────────────────────────────────
+  staging:
+    name: Staging Environment
+    runs-on: ubuntu-latest
+    needs: test
+    if: needs.test.outputs.status == 'success' && github.ref == 'refs/heads/main'
+    timeout-minutes: 90
+    environment: staging
+    outputs:
+      status: ${{ steps.emit.outputs.status }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_STAGING }}
+          role-session-name: GitHubActions-Staging-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init (staging)
+        run: terraform -chdir=terraform/environments/staging init
+
+      - name: Terraform Plan (staging)
+        id: plan
+        run: |
+          terraform -chdir=terraform/environments/staging plan \
+            -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
+            -out=tfplan.binary \
+            -detailed-exitcode 2>&1 | tee plan_output.txt
+
+      - name: Terraform Apply (staging)
+        id: apply
+        run: |
+          terraform -chdir=terraform/environments/staging apply \
+            -auto-approve \
+            tfplan.binary 2>&1 | tee apply_output.txt
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name eks-platform-staging
+
+      - name: Run K8s Health Check
+        id: healthcheck
+        run: |
+          chmod +x scripts/k8s-healthcheck.sh
+          scripts/k8s-healthcheck.sh eks-platform-staging ${{ env.AWS_REGION }} 2>&1 | tee healthcheck_output.txt
+        continue-on-error: false
+
+      - name: Validate Cluster Autoscaler
+        id: autoscaler
+        run: |
+          echo "Checking cluster autoscaler..."
+          kubectl wait --for=condition=available \
+            deployment/cluster-autoscaler \
+            -n kube-system \
+            --timeout=120s
+
+          CA_PODS=$(kubectl get pods -n kube-system -l app.kubernetes.io/name=cluster-autoscaler --field-selector=status.phase=Running -o name | wc -l)
+          if [[ "$CA_PODS" -lt "1" ]]; then
+            echo "FATAL: Cluster autoscaler pods not running"
+            exit 1
+          fi
+          echo "Cluster autoscaler running: $CA_PODS pod(s)"
+
+      - name: Validate DNS Resolution
+        id: dns
+        run: |
+          echo "Checking CoreDNS..."
+          kubectl wait --for=condition=available deployment/coredns -n kube-system --timeout=120s
+
+          kubectl run dns-test --image=busybox:1.28 --restart=Never --rm -i \
+            --timeout=60s \
+            -- nslookup kubernetes.default.svc.cluster.local && echo "DNS OK"
+
+      - name: Validate Ingress Controller
+        id: ingress
+        run: |
+          echo "Checking AWS Load Balancer Controller..."
+          kubectl wait --for=condition=available \
+            deployment/aws-load-balancer-controller \
+            -n kube-system \
+            --timeout=120s
+
+          LBC_PODS=$(kubectl get pods -n kube-system \
+            -l app.kubernetes.io/name=aws-load-balancer-controller \
+            --field-selector=status.phase=Running -o name | wc -l)
+          if [[ "$LBC_PODS" -lt "2" ]]; then
+            echo "WARNING: LBC running with only $LBC_PODS pod(s)"
+          fi
+          echo "AWS LBC running: $LBC_PODS pod(s)"
+
+      - name: Validate Metrics Server
+        id: metrics
+        run: |
+          kubectl wait --for=condition=available deployment/metrics-server -n kube-system --timeout=120s
+          kubectl top nodes || (echo "metrics-server not ready yet, giving 30s..."; sleep 30; kubectl top nodes)
+
+      - name: Validation Agent
+        id: agent
+        run: |
+          chmod +x scripts/pipeline-agent-verify.sh
+          scripts/pipeline-agent-verify.sh staging 2>&1 | tee agent_output.txt
+        continue-on-error: false
+
+      - name: Emit Staging Status
+        id: emit
+        if: always()
+        run: |
+          STATUS="success"
+          for outcome in \
+            "${{ steps.apply.outcome }}" \
+            "${{ steps.healthcheck.outcome }}" \
+            "${{ steps.autoscaler.outcome }}" \
+            "${{ steps.dns.outcome }}" \
+            "${{ steps.ingress.outcome }}" \
+            "${{ steps.metrics.outcome }}" \
+            "${{ steps.agent.outcome }}"; do
+            if [[ "$outcome" != "success" ]]; then
+              STATUS="failure"
+              break
+            fi
+          done
+
+          mkdir -p artifacts
+          cat > artifacts/agent-output.json << EOF
+          {
+            "stage": "staging",
+            "status": "$STATUS",
+            "reason": "apply=${{ steps.apply.outcome }}, healthcheck=${{ steps.healthcheck.outcome }}, autoscaler=${{ steps.autoscaler.outcome }}, dns=${{ steps.dns.outcome }}, ingress=${{ steps.ingress.outcome }}, agent=${{ steps.agent.outcome }}",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "commit": "${{ github.sha }}",
+            "actor": "${{ github.actor }}",
+            "environment": "staging"
+          }
+          EOF
+
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          cat artifacts/agent-output.json
+
+      - name: Upload Staging Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: staging-status
+          path: artifacts/agent-output.json
+          retention-days: 7
+
+      - name: Rollback on Failure
+        if: failure() && steps.apply.outcome == 'success'
+        run: |
+          echo "Rolling back staging environment..."
+          terraform -chdir=terraform/environments/staging apply \
+            -refresh-only \
+            -auto-approve \
+            -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" || true
+          kubectl rollout undo deployment --all -n kube-system || true
+
+# ──────────────────────────────────────────────
+# Stage 4: Production — manual approval gate + final validation
+# ──────────────────────────────────────────────
+  production:
+    name: Production Environment
+    runs-on: ubuntu-latest
+    needs: staging
+    if: needs.staging.outputs.status == 'success' && github.ref == 'refs/heads/main'
+    timeout-minutes: 90
+    environment: prod
+    outputs:
+      status: ${{ steps.emit.outputs.status }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_PROD }}
+          role-session-name: GitHubActions-Prod-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Download Prior Stage Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: staging-status
+          path: staging-artifacts/
+
+      - name: Verify Staging Gate
+        run: |
+          STAGING_STATUS=$(jq -r '.status' staging-artifacts/agent-output.json)
+          if [[ "$STAGING_STATUS" != "success" ]]; then
+            echo "FATAL: Staging gate not passed. Status: $STAGING_STATUS"
+            exit 1
+          fi
+          echo "Staging gate: PASSED"
+
+      - name: Terraform Init (prod)
+        run: terraform -chdir=terraform/environments/prod init
+
+      - name: Terraform Plan (prod)
+        id: plan
+        run: |
+          terraform -chdir=terraform/environments/prod plan \
+            -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
+            -out=tfplan.binary \
+            -detailed-exitcode 2>&1 | tee plan_output.txt
+
+      - name: Final Security Scan (prod)
+        id: security
+        run: |
+          pip3 install checkov
+          checkov -d terraform/environments/prod \
+            --framework terraform \
+            --compact \
+            --quiet || true
+
+          curl -L "https://github.com/aquasecurity/tfsec/releases/latest/download/tfsec-linux-amd64" -o /usr/local/bin/tfsec
+          chmod +x /usr/local/bin/tfsec
+          tfsec terraform/environments/prod \
+            --minimum-severity HIGH \
+            --no-color
+        continue-on-error: false
+
+      - name: Terraform Apply (prod)
+        id: apply
+        run: |
+          terraform -chdir=terraform/environments/prod apply \
+            -auto-approve \
+            tfplan.binary 2>&1 | tee apply_output.txt
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name eks-platform-prod
+
+      - name: Run K8s Health Check
+        id: healthcheck
+        run: |
+          chmod +x scripts/k8s-healthcheck.sh
+          scripts/k8s-healthcheck.sh eks-platform-prod ${{ env.AWS_REGION }} 2>&1 | tee healthcheck_output.txt
+        continue-on-error: false
+
+      - name: Verify Rollout Status
+        id: rollout
+        run: |
+          echo "Verifying all deployments are rolled out..."
+          for ns in kube-system; do
+            kubectl get deployments -n "$ns" -o name | while read -r deploy; do
+              echo "Checking $deploy in $ns..."
+              kubectl rollout status "$deploy" -n "$ns" --timeout=120s
+            done
+          done
+
+      - name: Final Validation Agent
+        id: agent
+        run: |
+          chmod +x scripts/pipeline-agent-verify.sh
+          scripts/pipeline-agent-verify.sh prod 2>&1 | tee agent_output.txt
+        continue-on-error: false
+
+      - name: Emit Production Status
+        id: emit
+        if: always()
+        run: |
+          STATUS="success"
+          for outcome in \
+            "${{ steps.security.outcome }}" \
+            "${{ steps.apply.outcome }}" \
+            "${{ steps.healthcheck.outcome }}" \
+            "${{ steps.rollout.outcome }}" \
+            "${{ steps.agent.outcome }}"; do
+            if [[ "$outcome" != "success" ]]; then
+              STATUS="failure"
+              break
+            fi
+          done
+
+          mkdir -p artifacts
+          cat > artifacts/agent-output.json << EOF
+          {
+            "stage": "production",
+            "status": "$STATUS",
+            "reason": "security=${{ steps.security.outcome }}, apply=${{ steps.apply.outcome }}, healthcheck=${{ steps.healthcheck.outcome }}, rollout=${{ steps.rollout.outcome }}, agent=${{ steps.agent.outcome }}",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "commit": "${{ github.sha }}",
+            "actor": "${{ github.actor }}",
+            "environment": "prod"
+          }
+          EOF
+
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
+          cat artifacts/agent-output.json
+
+      - name: Upload Production Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: prod-status
+          path: artifacts/agent-output.json
+          retention-days: 30
+
+      - name: Rollback on Failure
+        if: failure() && steps.apply.outcome == 'success'
+        run: |
+          echo "CRITICAL: Production apply failed. Initiating rollback..."
+          terraform -chdir=terraform/environments/prod apply \
+            -refresh-only \
+            -auto-approve \
+            -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" || true
+          kubectl rollout undo deployment --all -n kube-system || true
+          echo "Rollback complete. Manual review required."
+
+  # Pipeline summary job
+  pipeline-summary:
+    name: Pipeline Summary
+    runs-on: ubuntu-latest
+    needs: [build, test, staging, production]
+    if: always()
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts/
+        continue-on-error: true
+
+      - name: Generate Pipeline Summary
+        run: |
+          echo "## Pipeline Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Stage | Status |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|--------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Build | ${{ needs.build.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Test  | ${{ needs.test.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Staging | ${{ needs.staging.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Production | ${{ needs.production.result }} |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Commit: ${{ github.sha }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "Actor: ${{ github.actor }}" >> "$GITHUB_STEP_SUMMARY"

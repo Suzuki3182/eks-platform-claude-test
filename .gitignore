@@ -1,0 +1,41 @@
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+!example.tfvars
+crash.log
+crash.*.log
+.DS_Store
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+.vscode/
+*.code-workspace
+
+# OS
+Thumbs.db
+.env
+.env.local
+
+# Local testing
+*.pem
+*.pub
+kubeconfig
+kubeconfig_*
+plan_*.txt
+tfplan.binary
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# CI/CD artifacts
+artifacts/
+.github/workflows/*.log
