@@ -82,6 +82,7 @@ check_timeout
 
 if [[ -f apply_output.txt ]]; then
   APPLY_RESOURCES=$(grep -c "^  +" apply_output.txt 2>/dev/null || echo "0")
+  # shellcheck disable=SC2034
   APPLY_CHANGED=$(grep -c "Apply complete" apply_output.txt 2>/dev/null || echo "0")
   APPLY_ERRORS=$(grep -c "Error:" apply_output.txt 2>/dev/null || echo "0")
 

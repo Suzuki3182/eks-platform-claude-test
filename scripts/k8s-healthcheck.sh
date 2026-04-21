@@ -4,6 +4,7 @@ set -euo pipefail
 
 CLUSTER_NAME="${1:?Usage: $0 <cluster-name> <aws-region>}"
 AWS_REGION="${2:?Usage: $0 <cluster-name> <aws-region>}"
+export AWS_REGION  # Used externally by kubectl context selection
 TIMEOUT=300
 START_TIME=$(date +%s)
 
@@ -40,6 +41,8 @@ check_timeout() {
   fi
 }
 
+# Helper function for future use — currently invoked via healthcheck procedures
+# shellcheck disable=SC2317
 wait_for_condition() {
   local resource="$1"
   local condition="$2"
@@ -173,7 +176,7 @@ fi
 log_check "Pod Scheduling Across Nodes"
 check_timeout
 
-SCHEDULABLE=$(kubectl get nodes --no-headers | grep -v "SchedulingDisabled" | wc -l)
+SCHEDULABLE=$(kubectl get nodes --no-headers | grep -vc "SchedulingDisabled")
 if [[ "$SCHEDULABLE" -gt 1 ]]; then
   pass "Multiple nodes schedulable: $SCHEDULABLE"
 else
