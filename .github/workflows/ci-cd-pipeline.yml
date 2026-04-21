@@ -226,17 +226,41 @@ jobs:
             tfplan.binary 2>&1 | tee apply_output.txt
           echo "apply_exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve cluster name from Terraform output
+        id: cluster
+        run: |
+          CLUSTER_NAME=$(terraform -chdir=terraform/environments/test output -raw cluster_name 2>/dev/null || true)
+          if [[ -z "$CLUSTER_NAME" ]] || [[ "$CLUSTER_NAME" == "null" ]]; then
+            echo "ERROR: Could not resolve cluster_name from Terraform outputs"
+            terraform -chdir=terraform/environments/test output || true
+            exit 1
+          fi
+          echo "name=$CLUSTER_NAME" >> "$GITHUB_OUTPUT"
+          echo "cluster_name=$CLUSTER_NAME" >> "$GITHUB_ENV"
+
+      - name: Guard AWS account/region and cluster existence
+        run: |
+          ACTUAL_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          if [[ "$ACTUAL_ACCOUNT_ID" != "${{ secrets.AWS_ACCOUNT_ID }}" ]]; then
+            echo "ERROR: OIDC account mismatch. expected=${{ secrets.AWS_ACCOUNT_ID }} actual=$ACTUAL_ACCOUNT_ID"
+            exit 1
+          fi
+
+          aws eks describe-cluster \
+            --region "${{ env.AWS_REGION }}" \
+            --name "${{ steps.cluster.outputs.name }}" >/dev/null
+
       - name: Update kubeconfig
         run: |
           aws eks update-kubeconfig \
             --region ${{ env.AWS_REGION }} \
-            --name eks-platform-test
+            --name ${{ steps.cluster.outputs.name }}
 
       - name: Run K8s Health Check
         id: healthcheck
         run: |
           chmod +x scripts/k8s-healthcheck.sh
-          scripts/k8s-healthcheck.sh eks-platform-test ${{ env.AWS_REGION }} 2>&1 | tee healthcheck_output.txt
+          scripts/k8s-healthcheck.sh ${{ steps.cluster.outputs.name }} ${{ env.AWS_REGION }} 2>&1 | tee healthcheck_output.txt
           echo "healthcheck_exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
         continue-on-error: false
 
