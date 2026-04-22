@@ -315,7 +315,19 @@ jobs:
       - name: Resolve cluster name from Terraform output
         id: cluster
         run: |
-          CLUSTER_NAME=$(terraform -chdir=terraform/environments/test output -raw cluster_name 2>/dev/null || true)
+          # Parse JSON outputs first to avoid Terraform warning text polluting step outputs/env files.
+          CLUSTER_NAME=$(terraform -chdir=terraform/environments/test output -json 2>/dev/null | jq -r '.cluster_name.value // empty' || true)
+          CLUSTER_NAME=$(echo "$CLUSTER_NAME" | tr -d '\r\n')
+
+          # Fallback for first-run/no-output cases: derive from terraform.tfvars convention project-environment.
+          if [[ -z "$CLUSTER_NAME" ]]; then
+            PROJECT=$(awk -F'=' '/^project/{gsub(/[ "\t]/, "", $2); print $2}' terraform/environments/test/terraform.tfvars)
+            ENVIRONMENT=$(awk -F'=' '/^environment/{gsub(/[ "\t]/, "", $2); print $2}' terraform/environments/test/terraform.tfvars)
+            if [[ -n "$PROJECT" && -n "$ENVIRONMENT" ]]; then
+              CLUSTER_NAME="${PROJECT}-${ENVIRONMENT}"
+            fi
+          fi
+
           if [[ -z "$CLUSTER_NAME" ]] || [[ "$CLUSTER_NAME" == "null" ]]; then
             echo "ERROR: Could not resolve cluster_name from Terraform outputs"
             terraform -chdir=terraform/environments/test output || true
@@ -508,7 +520,19 @@ jobs:
       - name: Resolve cluster name from Terraform output
         id: cluster
         run: |
-          CLUSTER_NAME=$(terraform -chdir=terraform/environments/staging output -raw cluster_name 2>/dev/null || true)
+          # Parse JSON outputs first to avoid Terraform warning text polluting step outputs.
+          CLUSTER_NAME=$(terraform -chdir=terraform/environments/staging output -json 2>/dev/null | jq -r '.cluster_name.value // empty' || true)
+          CLUSTER_NAME=$(echo "$CLUSTER_NAME" | tr -d '\r\n')
+
+          # Fallback for first-run/no-output cases: derive from terraform.tfvars convention project-environment.
+          if [[ -z "$CLUSTER_NAME" ]]; then
+            PROJECT=$(awk -F'=' '/^project/{gsub(/[ "\t]/, "", $2); print $2}' terraform/environments/staging/terraform.tfvars)
+            ENVIRONMENT=$(awk -F'=' '/^environment/{gsub(/[ "\t]/, "", $2); print $2}' terraform/environments/staging/terraform.tfvars)
+            if [[ -n "$PROJECT" && -n "$ENVIRONMENT" ]]; then
+              CLUSTER_NAME="${PROJECT}-${ENVIRONMENT}"
+            fi
+          fi
+
           if [[ -z "$CLUSTER_NAME" ]] || [[ "$CLUSTER_NAME" == "null" ]]; then
             echo "ERROR: Could not resolve cluster_name from Terraform outputs"
             terraform -chdir=terraform/environments/staging output || true
