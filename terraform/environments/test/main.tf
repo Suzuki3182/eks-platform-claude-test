@@ -76,6 +76,7 @@ resource "aws_kms_key" "eks" {
   deletion_window_in_days = 7
   enable_key_rotation     = true
   multi_region            = false
+  bypass_policy_lockout_safety_check = true
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -240,20 +241,3 @@ module "addons" {
   depends_on = [module.eks, module.iam]
 }
 
-# ──────────────────────────────────────────────
-# GitHub Actions OIDC
-# Creates the provider + test-environment role.
-# Set create_oidc_provider = false for staging/prod
-# if they share this AWS account.
-# ──────────────────────────────────────────────
-module "github_oidc" {
-  source = "../../modules/github-oidc"
-
-  github_repo          = var.github_repo
-  environment          = var.environment
-  aws_account_id       = var.aws_account_id
-  aws_region           = var.aws_region
-  create_oidc_provider = false
-
-  tags = local.common_tags
-}
