@@ -254,8 +254,16 @@ jobs:
           fi
 
           CHANGES_COUNT=0
-          if [[ -f "$PLAN_FILE" ]]; then
-            CHANGES_COUNT=$(terraform show -json "$PLAN_FILE" | jq '[.resource_changes[]? | select((.change.actions | index("no-op")) | not)] | length')
+          PLAN_SUMMARY=$(grep -Eo 'Plan: [0-9]+ to add, [0-9]+ to change, [0-9]+ to destroy\.' plan_output.txt | tail -1 || true)
+          if [[ -n "$PLAN_SUMMARY" ]]; then
+            ADD_COUNT=$(echo "$PLAN_SUMMARY" | awk '{print $2}')
+            CHANGE_COUNT=$(echo "$PLAN_SUMMARY" | awk '{print $5}')
+            DESTROY_COUNT=$(echo "$PLAN_SUMMARY" | awk '{print $8}')
+            CHANGES_COUNT=$((ADD_COUNT + CHANGE_COUNT + DESTROY_COUNT))
+          elif grep -Eq 'No changes\.|No changes\. Your infrastructure matches the configuration\.' plan_output.txt; then
+            CHANGES_COUNT=0
+          elif [[ "$PLAN_EXIT" == "2" ]]; then
+            CHANGES_COUNT=1
           fi
 
           if [[ "$CHANGES_COUNT" -gt 0 ]]; then
