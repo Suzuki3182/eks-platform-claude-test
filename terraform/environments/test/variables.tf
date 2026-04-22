@@ -21,8 +21,3 @@ variable "project" {
   default     = "eks-platform"
 }
 
-variable "github_repo" {
-  description = "GitHub repository in 'org/repo' format"
-  type        = string
-  default     = "Suzuki3182/eks-platform-claude-test"
-}
