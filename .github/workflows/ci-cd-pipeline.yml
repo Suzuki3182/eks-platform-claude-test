@@ -344,9 +344,13 @@ jobs:
             exit 1
           fi
 
-          aws eks describe-cluster \
+          if aws eks describe-cluster \
             --region "${{ env.AWS_REGION }}" \
-            --name "${{ steps.cluster.outputs.name }}" >/dev/null
+            --name "${{ steps.cluster.outputs.name }}" >/dev/null 2>&1; then
+            echo "Cluster ${{ steps.cluster.outputs.name }} exists."
+          else
+            echo "WARNING: Cluster ${{ steps.cluster.outputs.name }} not found - may be first provisioning run. Continuing."
+          fi
 
       - name: Update kubeconfig
         run: |
@@ -548,9 +552,13 @@ jobs:
             exit 1
           fi
 
-          aws eks describe-cluster \
+          if aws eks describe-cluster \
             --region "${{ env.AWS_REGION }}" \
-            --name "${{ steps.cluster.outputs.name }}" >/dev/null
+            --name "${{ steps.cluster.outputs.name }}" >/dev/null 2>&1; then
+            echo "Cluster ${{ steps.cluster.outputs.name }} exists."
+          else
+            echo "WARNING: Cluster ${{ steps.cluster.outputs.name }} not found - may be first provisioning run. Continuing."
+          fi
 
       - name: Detect Kubernetes API reachability
         id: kube_api
