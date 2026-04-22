@@ -253,7 +253,7 @@ module "github_oidc" {
   environment          = var.environment
   aws_account_id       = var.aws_account_id
   aws_region           = var.aws_region
-  create_oidc_provider = true
+  create_oidc_provider = false
 
   tags = local.common_tags
 }
