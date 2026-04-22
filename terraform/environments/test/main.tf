@@ -72,10 +72,10 @@ locals {
 # KMS Key
 # ──────────────────────────────────────────────
 resource "aws_kms_key" "eks" {
-  description             = "KMS key for ${local.cluster_name} EKS secrets and EBS volumes"
-  deletion_window_in_days = 7
-  enable_key_rotation     = true
-  multi_region            = false
+  description                        = "KMS key for ${local.cluster_name} EKS secrets and EBS volumes"
+  deletion_window_in_days            = 7
+  enable_key_rotation                = true
+  multi_region                       = false
   bypass_policy_lockout_safety_check = true
 
   policy = jsonencode({
