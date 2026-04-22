@@ -206,6 +206,47 @@ jobs:
       - name: Terraform Init (test)
         run: terraform -chdir=terraform/environments/test init
 
+      - name: Cleanup stale test IAM artifacts
+        run: |
+          ROLE_NAMES=(
+            "eks-platform-test-cluster-role"
+            "eks-platform-test-node-role"
+            "eks-platform-test-vpc-cni"
+            "eks-platform-test-ebs-csi"
+            "eks-platform-test-aws-lbc"
+            "eks-platform-test-cluster-autoscaler"
+            "eks-platform-test-vpc-flow-logs"
+          )
+
+          for role in "${ROLE_NAMES[@]}"; do
+            if aws iam get-role --role-name "$role" >/dev/null 2>&1; then
+              for policy_arn in $(aws iam list-attached-role-policies --role-name "$role" --query 'AttachedPolicies[].PolicyArn' --output text); do
+                aws iam detach-role-policy --role-name "$role" --policy-arn "$policy_arn" || true
+              done
+
+              for policy_name in $(aws iam list-role-policies --role-name "$role" --query 'PolicyNames[]' --output text); do
+                aws iam delete-role-policy --role-name "$role" --policy-name "$policy_name" || true
+              done
+
+              aws iam delete-role --role-name "$role" || true
+            fi
+          done
+
+          POLICY_NAMES=(
+            "eks-platform-test-aws-lbc-policy"
+            "eks-platform-test-cluster-autoscaler-policy"
+          )
+
+          for policy_name in "${POLICY_NAMES[@]}"; do
+            policy_arn=$(aws iam list-policies --scope Local --query "Policies[?PolicyName=='$policy_name'].Arn | [0]" --output text)
+            if [[ -n "$policy_arn" && "$policy_arn" != "None" ]]; then
+              for version_id in $(aws iam list-policy-versions --policy-arn "$policy_arn" --query 'Versions[?IsDefaultVersion==`false`].VersionId' --output text); do
+                aws iam delete-policy-version --policy-arn "$policy_arn" --version-id "$version_id" || true
+              done
+              aws iam delete-policy --policy-arn "$policy_arn" || true
+            fi
+          done
+
       - name: Terraform Plan (test)
         id: plan
         run: |
