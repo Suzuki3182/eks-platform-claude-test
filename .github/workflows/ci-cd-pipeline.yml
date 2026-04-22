@@ -216,7 +216,8 @@ jobs:
               -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
               -out="$PLAN_FILE" \
               -detailed-exitcode 2>&1 | tee plan_output.txt
-            return ${PIPESTATUS[0]}
+            local tf_exit=${PIPESTATUS[0]}
+            return $tf_exit
           }
 
           set +e
@@ -304,7 +305,9 @@ jobs:
           terraform -chdir=terraform/environments/test apply \
             -auto-approve \
             "${{ steps.plan.outputs.plan_file }}" 2>&1 | tee apply_output.txt
-          echo "apply_exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+          apply_exit=${PIPESTATUS[0]}
+          echo "apply_exit_code=$apply_exit" >> "$GITHUB_OUTPUT"
+          exit $apply_exit
 
       - name: Terraform Apply (test) - No Changes
         id: apply_no_changes
@@ -337,6 +340,7 @@ jobs:
           echo "cluster_name=$CLUSTER_NAME" >> "$GITHUB_ENV"
 
       - name: Guard AWS account/region and cluster existence
+        id: guard
         run: |
           ACTUAL_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           if [[ "$ACTUAL_ACCOUNT_ID" != "${{ secrets.AWS_ACCOUNT_ID }}" ]]; then
@@ -348,11 +352,14 @@ jobs:
             --region "${{ env.AWS_REGION }}" \
             --name "${{ steps.cluster.outputs.name }}" >/dev/null 2>&1; then
             echo "Cluster ${{ steps.cluster.outputs.name }} exists."
+            echo "cluster_exists=true" >> "$GITHUB_OUTPUT"
           else
-            echo "WARNING: Cluster ${{ steps.cluster.outputs.name }} not found - may be first provisioning run. Continuing."
+            echo "WARNING: Cluster ${{ steps.cluster.outputs.name }} not found - may be first provisioning run. Skipping kubeconfig/healthcheck."
+            echo "cluster_exists=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Update kubeconfig
+        if: steps.guard.outputs.cluster_exists == 'true'
         run: |
           aws eks update-kubeconfig \
             --region ${{ env.AWS_REGION }} \
@@ -360,10 +367,13 @@ jobs:
 
       - name: Run K8s Health Check
         id: healthcheck
+        if: steps.guard.outputs.cluster_exists == 'true'
         run: |
           chmod +x scripts/k8s-healthcheck.sh
           scripts/k8s-healthcheck.sh ${{ steps.cluster.outputs.name }} ${{ env.AWS_REGION }} 2>&1 | tee healthcheck_output.txt
-          echo "healthcheck_exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+          hc_exit=${PIPESTATUS[0]}
+          echo "healthcheck_exit_code=$hc_exit" >> "$GITHUB_OUTPUT"
+          exit $hc_exit
         continue-on-error: false
 
       - name: Validation Agent
