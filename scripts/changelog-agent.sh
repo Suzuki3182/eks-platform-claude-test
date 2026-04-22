@@ -30,42 +30,6 @@ COMMIT_COUNT=$(git rev-list --count "$FROM_REF..$TO_REF" 2>/dev/null || git rev-
 echo "Analyzing $COMMIT_COUNT commits from $FROM_REF to $TO_REF"
 echo ""
 
-# Initialize JSON array
-JSON_ENTRIES="[]"
-MARKDOWN_ENTRIES=""
-
-# Parse each commit
-git log "$FROM_REF..$TO_REF" --pretty=format:"%H%n%an%n%ae%n%ad%n%s%n%b%n---COMMIT_END---%n" --date=iso 2>/dev/null | while IFS= read -r line; do
-  # Parse commit details
-  if [[ "$line" == "---COMMIT_END---" ]]; then
-    continue
-  fi
-  
-  # Extract commit info
-  COMMIT=$(git log -1 --pretty=format:"%H" 2>/dev/null | head -c 7)
-  AUTHOR=$(git log -1 --pretty=format:"%an" 2>/dev/null)
-  MESSAGE=$(git log -1 --pretty=format:"%s" 2>/dev/null)
-  DATE=$(git log -1 --pretty=format:"%ad" --date=short 2>/dev/null)
-  
-  # Categorize based on commit message
-  if [[ "$MESSAGE" =~ feat|feature ]]; then
-    CATEGORY="Features"
-  elif [[ "$MESSAGE" =~ fix|bug ]]; then
-    CATEGORY="Bug Fixes"
-  elif [[ "$MESSAGE" =~ sec|security|CVE ]]; then
-    CATEGORY="Security"
-  elif [[ "$MESSAGE" =~ perf|performance ]]; then
-    CATEGORY="Performance"
-  elif [[ "$MESSAGE" =~ docs|doc ]]; then
-    CATEGORY="Documentation"
-  elif [[ "$MESSAGE" =~ chore|refactor ]]; then
-    CATEGORY="Chores"
-  else
-    CATEGORY="Other"
-  fi
-  
-done
-
 # Get git log in structured format
 git log "$FROM_REF..$TO_REF" --pretty=format:"%h|%an|%ae|%ad|%s" --date=short 2>/dev/null > /tmp/changelog_raw.txt || {
   git log "$TO_REF" -10 --pretty=format:"%h|%an|%ae|%ad|%s" --date=short > /tmp/changelog_raw.txt
@@ -82,7 +46,7 @@ git log "$FROM_REF..$TO_REF" --pretty=format:"%h|%an|%ae|%ad|%s" --date=short 2>
   
   # Group by category
   declare -A categories
-  while IFS='|' read -r hash author email date subject; do
+  while IFS='|' read -r hash author _email date subject; do
     if [[ -z "$hash" ]]; then continue; fi
     
     if [[ "$subject" =~ terraform|tfvar|tf_ ]]; then
@@ -118,15 +82,16 @@ git log "$FROM_REF..$TO_REF" --pretty=format:"%h|%an|%ae|%ad|%s" --date=short 2>
 } > artifacts/CHANGELOG.md
 
 # Generate JSON artifact
+ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 {
   echo "{"
-  echo '  "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'",'
-  echo '  "commit_range": "'$FROM_REF'..'$TO_REF'",'
-  echo '  "total_commits": '$COMMIT_COUNT','
+  echo "  \"timestamp\": \"${ts}\","
+  echo "  \"commit_range\": \"${FROM_REF}..${TO_REF}\","
+  echo "  \"total_commits\": ${COMMIT_COUNT},"
   echo '  "commits": ['
   
   first=true
-  while IFS='|' read -r hash author email date subject; do
+  while IFS='|' read -r hash author _email date subject; do
     if [[ -z "$hash" ]]; then continue; fi
     
     if [[ "$first" == true ]]; then
@@ -135,7 +100,7 @@ git log "$FROM_REF..$TO_REF" --pretty=format:"%h|%an|%ae|%ad|%s" --date=short 2>
       echo ","
     fi
     
-    echo -n '    {"commit": "'$hash'", "author": "'$author'", "date": "'$date'", "subject": "'$subject'"}'
+    echo -n "    {\"commit\": \"${hash}\", \"author\": \"${author}\", \"date\": \"${date}\", \"subject\": \"${subject}\"}"
   done < /tmp/changelog_raw.txt
   
   echo ""

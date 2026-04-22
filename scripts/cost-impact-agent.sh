@@ -80,23 +80,23 @@ TOTAL_MONTHLY_DELTA=0
 CREATED_COST=0
 DELETED_COST=0
 
-echo "$CREATED" | while read count resource_type; do
+while read -r count resource_type; do
   if [[ -n "$count" && "$count" != "0" ]]; then
     unit_cost=$(estimate_resource_cost "$resource_type" "create")
     resource_total=$(echo "$count * $unit_cost" | bc 2>/dev/null || echo "0")
     CREATED_COST=$(echo "$CREATED_COST + $resource_total" | bc)
     echo "  + $resource_type: $count × \$$unit_cost = \$$resource_total/month"
   fi
-done
+done < <(echo "$CREATED")
 
-echo "$DELETED" | while read count resource_type; do
+while read -r count resource_type; do
   if [[ -n "$count" && "$count" != "0" ]]; then
     unit_cost=$(estimate_resource_cost "$resource_type" "delete")
     resource_total=$(echo "$count * $unit_cost" | bc 2>/dev/null || echo "0")
     DELETED_COST=$(echo "$DELETED_COST + $resource_total" | bc)
     echo "  - $resource_type: $count × \$$unit_cost = \$$resource_total/month"
   fi
-done
+done < <(echo "$DELETED")
 
 TOTAL_MONTHLY_DELTA=$(echo "$CREATED_COST - $DELETED_COST" | bc 2>/dev/null || echo "0")
 

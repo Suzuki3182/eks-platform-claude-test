@@ -17,6 +17,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 
 # Load configuration
 if [[ -f .github/auto-approval-config.env ]]; then
+  # shellcheck source=/dev/null
   source .github/auto-approval-config.env
   echo "✅ Loaded configuration from .github/auto-approval-config.env"
 else
@@ -41,7 +42,8 @@ mkdir -p artifacts
 log_decision() {
   local level="$1"
   local message="$2"
-  local timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  local timestamp
+  timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   echo "[$timestamp] [$level] $message" | tee -a "$LOG_FILE"
 }
 
