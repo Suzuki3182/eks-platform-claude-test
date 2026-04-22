@@ -556,29 +556,83 @@ jobs:
             exit 1
           fi
 
-          NODEGROUPS=$(aws eks list-nodegroups \
-            --region "${{ env.AWS_REGION }}" \
-            --cluster-name "${{ steps.cluster.outputs.name }}" \
-            --query 'nodegroups' \
-            --output text)
-
-          if [[ -z "$NODEGROUPS" ]]; then
-            echo "FATAL: No node groups found in staging cluster"
-            exit 1
-          fi
-
-          for ng in $NODEGROUPS; do
-            NG_STATUS=$(aws eks describe-nodegroup \
+          # Compute can be provided by managed node groups, Fargate profiles, or self-managed/Karpenter EC2 nodes.
+          NODEGROUPS=""
+          for attempt in 1 2 3 4 5 6; do
+            NODEGROUPS=$(aws eks list-nodegroups \
               --region "${{ env.AWS_REGION }}" \
               --cluster-name "${{ steps.cluster.outputs.name }}" \
-              --nodegroup-name "$ng" \
-              --query 'nodegroup.status' \
+              --query 'nodegroups' \
               --output text)
-            if [[ "$NG_STATUS" != "ACTIVE" ]]; then
-              echo "FATAL: Node group $ng is not ACTIVE (status=$NG_STATUS)"
-              exit 1
+
+            if [[ -n "$NODEGROUPS" ]] && [[ "$NODEGROUPS" != "None" ]]; then
+              echo "Managed node groups discovered on attempt $attempt: $NODEGROUPS"
+              break
             fi
+
+            echo "No managed node groups reported yet (attempt $attempt/6). Retrying in 20s..."
+            sleep 20
           done
+
+          COMPUTE_FOUND=false
+
+          if [[ -n "$NODEGROUPS" ]] && [[ "$NODEGROUPS" != "None" ]]; then
+            COMPUTE_FOUND=true
+            for ng in $NODEGROUPS; do
+              NG_STATUS=$(aws eks describe-nodegroup \
+                --region "${{ env.AWS_REGION }}" \
+                --cluster-name "${{ steps.cluster.outputs.name }}" \
+                --nodegroup-name "$ng" \
+                --query 'nodegroup.status' \
+                --output text)
+              if [[ "$NG_STATUS" != "ACTIVE" ]]; then
+                echo "FATAL: Node group $ng is not ACTIVE (status=$NG_STATUS)"
+                exit 1
+              fi
+            done
+          else
+            FARGATE_PROFILES=$(aws eks list-fargate-profiles \
+              --region "${{ env.AWS_REGION }}" \
+              --cluster-name "${{ steps.cluster.outputs.name }}" \
+              --query 'fargateProfileNames' \
+              --output text)
+
+            if [[ -n "$FARGATE_PROFILES" ]] && [[ "$FARGATE_PROFILES" != "None" ]]; then
+              COMPUTE_FOUND=true
+              echo "No managed node groups found; validating Fargate profiles: $FARGATE_PROFILES"
+              for fp in $FARGATE_PROFILES; do
+                FP_STATUS=$(aws eks describe-fargate-profile \
+                  --region "${{ env.AWS_REGION }}" \
+                  --cluster-name "${{ steps.cluster.outputs.name }}" \
+                  --fargate-profile-name "$fp" \
+                  --query 'fargateProfile.status' \
+                  --output text)
+                if [[ "$FP_STATUS" != "ACTIVE" ]]; then
+                  echo "FATAL: Fargate profile $fp is not ACTIVE (status=$FP_STATUS)"
+                  exit 1
+                fi
+              done
+            fi
+          fi
+
+          if [[ "$COMPUTE_FOUND" != "true" ]]; then
+            CLUSTER_TAG="kubernetes.io/cluster/${{ steps.cluster.outputs.name }}"
+            EC2_COUNT=$(aws ec2 describe-instances \
+              --region "${{ env.AWS_REGION }}" \
+              --filters "Name=tag:${CLUSTER_TAG},Values=owned,shared" "Name=instance-state-name,Values=pending,running" \
+              --query 'Reservations[].Instances[].InstanceId' \
+              --output text | wc -w)
+
+            if [[ "$EC2_COUNT" -gt 0 ]]; then
+              COMPUTE_FOUND=true
+              echo "No managed node groups/Fargate profiles found, but discovered $EC2_COUNT tagged EC2 instance(s)."
+            fi
+          fi
+
+          if [[ "$COMPUTE_FOUND" != "true" ]]; then
+            echo "FATAL: No active compute capacity found for cluster (managed node groups, Fargate profiles, or tagged EC2 instances)."
+            exit 1
+          fi
 
           ADDONS=$(aws eks list-addons \
             --region "${{ env.AWS_REGION }}" \
@@ -601,7 +655,7 @@ jobs:
             done
           fi
 
-          echo "Fallback validation passed (cluster, nodegroups, and managed add-ons are ACTIVE)."
+          echo "Fallback validation passed (cluster control plane, compute backing, and managed add-ons are ACTIVE)."
 
       - name: Validation Agent
         id: agent
