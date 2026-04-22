@@ -9,6 +9,11 @@ output "cluster_endpoint" {
   sensitive   = true
 }
 
+output "github_actions_role_arn" {
+  description = "IAM role ARN for GitHub Actions (set as AWS_ROLE_STAGING secret)"
+  value       = module.github_oidc.github_actions_role_arn
+}
+
 output "oidc_issuer_url" {
   description = "OIDC issuer URL"
   value       = module.eks.oidc_issuer_url

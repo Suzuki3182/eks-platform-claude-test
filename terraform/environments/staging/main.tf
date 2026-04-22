@@ -211,3 +211,20 @@ module "addons" {
 
   depends_on = [module.eks, module.iam]
 }
+
+# ──────────────────────────────────────────────
+# GitHub Actions OIDC
+# OIDC provider already created in test environment
+# (same AWS account); only creates the staging role.
+# ──────────────────────────────────────────────
+module "github_oidc" {
+  source = "../../modules/github-oidc"
+
+  github_repo          = var.github_repo
+  environment          = var.environment
+  aws_account_id       = var.aws_account_id
+  aws_region           = var.aws_region
+  create_oidc_provider = false
+
+  tags = local.common_tags
+}
