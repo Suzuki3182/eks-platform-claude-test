@@ -252,6 +252,7 @@ resource "aws_eks_node_group" "this" {
   node_group_name = "${var.cluster_name}-${each.key}"
   node_role_arn   = var.node_role_arn
   subnet_ids      = var.private_subnet_ids
+  ami_type        = "AL2023_x86_64_STANDARD"
   instance_types  = each.value.instance_types
   capacity_type   = each.value.capacity_type
 
