@@ -253,6 +253,18 @@ jobs:
             exit 1
           fi
 
+          CHANGES_COUNT=0
+          if [[ -f "$PLAN_FILE" ]]; then
+            CHANGES_COUNT=$(terraform show -json "$PLAN_FILE" | jq '[.resource_changes[]? | select((.change.actions | index("no-op")) | not)] | length')
+          fi
+
+          if [[ "$CHANGES_COUNT" -gt 0 ]]; then
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "changes_count=$CHANGES_COUNT" >> "$GITHUB_OUTPUT"
+
       - name: tfsec Security Scan
         id: tfsec
         run: |
@@ -301,7 +313,7 @@ jobs:
 
       - name: Terraform Apply (test)
         id: apply
-        if: steps.plan.outputs.exit_code == '2'
+        if: steps.plan.outputs.has_changes == 'true'
         run: |
           terraform -chdir=terraform/environments/test apply \
             -auto-approve \
@@ -312,9 +324,9 @@ jobs:
 
       - name: Terraform Apply (test) - No Changes
         id: apply_no_changes
-        if: steps.plan.outputs.exit_code == '0'
+        if: steps.plan.outputs.has_changes != 'true'
         run: |
-          echo "No infrastructure changes detected (plan exit code 0). Skipping apply."
+          echo "No infrastructure changes detected (parsed changes_count=${{ steps.plan.outputs.changes_count }}). Skipping apply."
 
       - name: Resolve cluster name from Terraform output
         id: cluster
@@ -391,11 +403,11 @@ jobs:
           STATUS="success"
           APPLY_STATUS="failure"
 
-          if [[ "${{ steps.plan.outputs.exit_code }}" == "2" ]] && [[ "${{ steps.apply.outcome }}" == "success" ]]; then
+          if [[ "${{ steps.plan.outputs.has_changes }}" == "true" ]] && [[ "${{ steps.apply.outcome }}" == "success" ]]; then
             APPLY_STATUS="success"
           fi
 
-          if [[ "${{ steps.plan.outputs.exit_code }}" == "0" ]] && [[ "${{ steps.apply_no_changes.outcome }}" == "success" ]]; then
+          if [[ "${{ steps.plan.outputs.has_changes }}" != "true" ]] && [[ "${{ steps.apply_no_changes.outcome }}" == "success" ]]; then
             APPLY_STATUS="success"
           fi
 
@@ -412,7 +424,7 @@ jobs:
           {
             "stage": "test",
             "status": "$STATUS",
-              "reason": "tfsec=${{ steps.tfsec.outcome }}, checkov=${{ steps.checkov.outcome }}, cost_agent=${{ steps.cost_agent.outcome }}, plan_exit_code=${{ steps.plan.outputs.exit_code }}, apply=${{ steps.apply.outcome }}, apply_no_changes=${{ steps.apply_no_changes.outcome }}, apply_effective=$APPLY_STATUS, healthcheck=${{ steps.healthcheck.outcome }}, agent=${{ steps.agent.outcome }}",
+              "reason": "tfsec=${{ steps.tfsec.outcome }}, checkov=${{ steps.checkov.outcome }}, cost_agent=${{ steps.cost_agent.outcome }}, plan_exit_code=${{ steps.plan.outputs.exit_code }}, plan_has_changes=${{ steps.plan.outputs.has_changes }}, changes_count=${{ steps.plan.outputs.changes_count }}, apply=${{ steps.apply.outcome }}, apply_no_changes=${{ steps.apply_no_changes.outcome }}, apply_effective=$APPLY_STATUS, healthcheck=${{ steps.healthcheck.outcome }}, agent=${{ steps.agent.outcome }}",
             "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "commit": "${{ github.sha }}",
             "actor": "${{ github.actor }}",
