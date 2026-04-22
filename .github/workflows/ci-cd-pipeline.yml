@@ -216,6 +216,7 @@ jobs:
           terraform -chdir=terraform/environments/test plan \
             -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
             -out="$PLAN_FILE" \
+            -no-color \
             -detailed-exitcode 2>&1 | tee plan_output.txt
           PLAN_EXIT=$?
           set +o pipefail
@@ -233,6 +234,7 @@ jobs:
               terraform -chdir=terraform/environments/test plan \
                 -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
                 -out="$PLAN_FILE" \
+                -no-color \
                 -detailed-exitcode 2>&1 | tee plan_output.txt
               PLAN_EXIT=$?
               set +o pipefail
@@ -254,13 +256,14 @@ jobs:
           fi
 
           CHANGES_COUNT=0
-          PLAN_SUMMARY=$(grep -Eo 'Plan: [0-9]+ to add, [0-9]+ to change, [0-9]+ to destroy\.' plan_output.txt | tail -1 || true)
+          CLEAN_PLAN_OUTPUT=$(sed -r 's/\x1B\[[0-9;]*[A-Za-z]//g' plan_output.txt)
+          PLAN_SUMMARY=$(echo "$CLEAN_PLAN_OUTPUT" | grep -Eo 'Plan: [0-9]+ to add, [0-9]+ to change, [0-9]+ to destroy\.' | tail -1 || true)
           if [[ -n "$PLAN_SUMMARY" ]]; then
             ADD_COUNT=$(echo "$PLAN_SUMMARY" | awk '{print $2}')
             CHANGE_COUNT=$(echo "$PLAN_SUMMARY" | awk '{print $5}')
             DESTROY_COUNT=$(echo "$PLAN_SUMMARY" | awk '{print $8}')
             CHANGES_COUNT=$((ADD_COUNT + CHANGE_COUNT + DESTROY_COUNT))
-          elif grep -Eq 'No changes\.|No changes\. Your infrastructure matches the configuration\.' plan_output.txt; then
+          elif echo "$CLEAN_PLAN_OUTPUT" | grep -Eq 'No changes\.|No changes\. Your infrastructure matches the configuration\.'; then
             CHANGES_COUNT=0
           elif [[ "$PLAN_EXIT" == "2" ]]; then
             CHANGES_COUNT=1
