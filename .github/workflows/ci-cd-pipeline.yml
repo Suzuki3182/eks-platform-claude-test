@@ -211,18 +211,14 @@ jobs:
         run: |
           PLAN_FILE="$PWD/terraform/environments/test/tfplan.binary"
 
-          run_plan() {
-            terraform -chdir=terraform/environments/test plan \
-              -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
-              -out="$PLAN_FILE" \
-              -detailed-exitcode 2>&1 | tee plan_output.txt
-            local tf_exit=${PIPESTATUS[0]}
-            return $tf_exit
-          }
-
           set +e
-          run_plan
+          set -o pipefail
+          terraform -chdir=terraform/environments/test plan \
+            -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
+            -out="$PLAN_FILE" \
+            -detailed-exitcode 2>&1 | tee plan_output.txt
           PLAN_EXIT=$?
+          set +o pipefail
           set -e
 
           if [[ "$PLAN_EXIT" -eq 1 ]] && grep -q "Error acquiring the state lock" plan_output.txt; then
@@ -233,8 +229,13 @@ jobs:
               sleep 5
 
               set +e
-              run_plan
+              set -o pipefail
+              terraform -chdir=terraform/environments/test plan \
+                -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
+                -out="$PLAN_FILE" \
+                -detailed-exitcode 2>&1 | tee plan_output.txt
               PLAN_EXIT=$?
+              set +o pipefail
               set -e
             fi
           fi
