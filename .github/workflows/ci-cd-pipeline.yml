@@ -208,6 +208,15 @@ jobs:
 
       - name: Cleanup stale test IAM artifacts
         run: |
+          PROJECT=$(awk -F'=' '/^project/{gsub(/[ "\t]/, "", $2); print $2}' terraform/environments/test/terraform.tfvars)
+          ENVIRONMENT=$(awk -F'=' '/^environment/{gsub(/[ "\t]/, "", $2); print $2}' terraform/environments/test/terraform.tfvars)
+          CLUSTER_NAME="${PROJECT}-${ENVIRONMENT}"
+
+          if aws eks describe-cluster --region "${{ env.AWS_REGION }}" --name "$CLUSTER_NAME" >/dev/null 2>&1; then
+            echo "Cluster $CLUSTER_NAME already exists; skipping stale IAM cleanup."
+            exit 0
+          fi
+
           ROLE_NAMES=(
             "eks-platform-test-cluster-role"
             "eks-platform-test-node-role"
