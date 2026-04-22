@@ -113,6 +113,31 @@ resource "aws_kms_key" "eks" {
           "kms:DescribeKey"
         ]
         Resource = "*"
+      },
+      {
+        Sid    = "AllowEC2EBSUse"
+        Effect = "Allow"
+        Principal = {
+          AWS = "*"
+        }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:CreateGrant",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "kms:CallerAccount" = var.aws_account_id
+            "kms:ViaService"    = "ec2.${var.aws_region}.amazonaws.com"
+          }
+          Bool = {
+            "kms:GrantIsForAWSResource" = true
+          }
+        }
       }
     ]
   })
