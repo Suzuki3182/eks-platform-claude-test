@@ -206,6 +206,21 @@ jobs:
       - name: Terraform Init (test)
         run: terraform -chdir=terraform/environments/test init
 
+      - name: Detect existing test cluster
+        id: precheck_cluster
+        run: |
+          PROJECT=$(awk -F'=' '/^project/{gsub(/[ "\t]/, "", $2); print $2}' terraform/environments/test/terraform.tfvars)
+          ENVIRONMENT=$(awk -F'=' '/^environment/{gsub(/[ "\t]/, "", $2); print $2}' terraform/environments/test/terraform.tfvars)
+          CLUSTER_NAME="${PROJECT}-${ENVIRONMENT}"
+
+          if aws eks describe-cluster --region "${{ env.AWS_REGION }}" --name "$CLUSTER_NAME" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "name=$CLUSTER_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "name=$CLUSTER_NAME" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Cleanup stale test IAM artifacts
         run: |
           PROJECT=$(awk -F'=' '/^project/{gsub(/[ "\t]/, "", $2); print $2}' terraform/environments/test/terraform.tfvars)
@@ -374,7 +389,7 @@ jobs:
 
       - name: Terraform Apply (test)
         id: apply
-        if: steps.plan.outputs.has_changes == 'true'
+        if: steps.plan.outputs.has_changes == 'true' && steps.precheck_cluster.outputs.exists != 'true'
         run: |
           terraform -chdir=terraform/environments/test apply \
             -auto-approve \
@@ -385,9 +400,13 @@ jobs:
 
       - name: Terraform Apply (test) - No Changes
         id: apply_no_changes
-        if: steps.plan.outputs.has_changes != 'true'
+        if: steps.plan.outputs.has_changes != 'true' || steps.precheck_cluster.outputs.exists == 'true'
         run: |
-          echo "No infrastructure changes detected (parsed changes_count=${{ steps.plan.outputs.changes_count }}). Skipping apply."
+          if [[ "${{ steps.precheck_cluster.outputs.exists }}" == "true" ]] && [[ "${{ steps.plan.outputs.has_changes }}" == "true" ]]; then
+            echo "Existing cluster detected (${{ steps.precheck_cluster.outputs.name }}). Skipping apply to avoid destructive cluster replacement in retry runs."
+          else
+            echo "No infrastructure changes detected (parsed changes_count=${{ steps.plan.outputs.changes_count }}). Skipping apply."
+          fi
 
       - name: Resolve cluster name from Terraform output
         id: cluster
