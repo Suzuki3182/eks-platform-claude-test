@@ -20,6 +20,39 @@ log_warn()  { echo -e "${YELLOW}[AGENT]${NC}  $(date -u +%T) $*"; }
 log_error() { echo -e "${RED}[AGENT]${NC}  $(date -u +%T) $*"; }
 log_stage() { echo -e "\n${BLUE}[STAGE]${NC}  ═══ $* ═══"; }
 
+kctl() {
+  kubectl --request-timeout=10s "$@"
+}
+
+is_cluster_reachable() {
+  kctl cluster-info &>/dev/null
+}
+
+aws_cluster_status() {
+  aws eks describe-cluster --name "${CLUSTER_NAME:-}" --region "${AWS_REGION:-}" --query 'cluster.status' --output text 2>/dev/null || echo "UNKNOWN"
+}
+
+aws_ready_nodegroups() {
+  local count=0
+  local nodegroups
+  nodegroups=$(aws eks list-nodegroups --cluster-name "${CLUSTER_NAME:-}" --region "${AWS_REGION:-}" --query 'nodegroups' --output text 2>/dev/null || true)
+
+  if [[ -z "$nodegroups" || "$nodegroups" == "None" ]]; then
+    echo "0"
+    return
+  fi
+
+  for ng in $nodegroups; do
+    local status
+    status=$(aws eks describe-nodegroup --cluster-name "${CLUSTER_NAME:-}" --nodegroup-name "$ng" --region "${AWS_REGION:-}" --query 'nodegroup.status' --output text 2>/dev/null || echo "UNKNOWN")
+    if [[ "$status" == "ACTIVE" ]]; then
+      count=$((count + 1))
+    fi
+  done
+
+  echo "$count"
+}
+
 # ──────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────
@@ -70,6 +103,9 @@ log_stage "Pre-flight checks for stage: $STAGE"
 assert_command kubectl
 assert_command jq
 assert_command aws
+
+CLUSTER_NAME="${CLUSTER_NAME:-${cluster_name:-eks-platform-${STAGE}}}"
+AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
 
 log_info "kubectl version: $(kubectl version --client -o json | jq -r '.clientVersion.gitVersion')"
 log_info "AWS CLI version: $(aws --version)"
@@ -139,30 +175,42 @@ case "$STAGE" in
     log_stage "Test stage validation"
     check_timeout
 
-    # Verify cluster is reachable
-    if ! kubectl cluster-info &>/dev/null; then
-      emit_status "failure" "Cannot reach cluster API server"
-      exit 1
-    fi
-    log_info "Cluster API server reachable"
+    # Verify cluster is reachable. For private endpoint clusters, use AWS API fallback.
+    if is_cluster_reachable; then
+      log_info "Cluster API server reachable"
 
-    # Verify minimum nodes
-    READY_NODES=$(kubectl get nodes --no-headers 2>/dev/null | grep -c " Ready " || echo 0)
-    if [[ "$READY_NODES" -lt 1 ]]; then
-      emit_status "failure" "No ready nodes in test cluster"
-      exit 1
-    fi
-    log_info "Ready nodes: $READY_NODES"
+      READY_NODES=$(kctl get nodes --no-headers 2>/dev/null | grep -c " Ready " || echo 0)
+      if [[ "$READY_NODES" -lt 1 ]]; then
+        emit_status "failure" "No ready nodes in test cluster"
+        exit 1
+      fi
+      log_info "Ready nodes: $READY_NODES"
 
-    # Verify kube-system healthy
-    PENDING_PODS=$(kubectl get pods -n kube-system --field-selector=status.phase=Pending \
-      --no-headers 2>/dev/null | wc -l || echo 0)
-    if [[ "$PENDING_PODS" -gt 5 ]]; then
-      emit_status "failure" "Too many pending pods in kube-system: $PENDING_PODS"
-      exit 1
-    fi
+      PENDING_PODS=$(kctl get pods -n kube-system --field-selector=status.phase=Pending \
+        --no-headers 2>/dev/null | wc -l || echo 0)
+      if [[ "$PENDING_PODS" -gt 5 ]]; then
+        emit_status "failure" "Too many pending pods in kube-system: $PENDING_PODS"
+        exit 1
+      fi
 
-    emit_status "success" "Test stage validation passed — nodes=$READY_NODES, pending_pods=$PENDING_PODS"
+      emit_status "success" "Test stage validation passed — nodes=$READY_NODES, pending_pods=$PENDING_PODS"
+    else
+      log_warn "Cluster API server unreachable from runner. Falling back to AWS EKS API checks."
+      STATUS=$(aws_cluster_status)
+      ACTIVE_NGS=$(aws_ready_nodegroups)
+
+      if [[ "$STATUS" != "ACTIVE" ]]; then
+        emit_status "failure" "Cluster is not ACTIVE (status=$STATUS)"
+        exit 1
+      fi
+
+      if [[ "$ACTIVE_NGS" -lt 1 ]]; then
+        emit_status "failure" "No ACTIVE node groups found"
+        exit 1
+      fi
+
+      emit_status "success" "Test stage validation passed (AWS API fallback) — cluster_status=$STATUS, active_nodegroups=$ACTIVE_NGS"
+    fi
     ;;
 
   staging)
