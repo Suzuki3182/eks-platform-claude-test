@@ -11,7 +11,7 @@ output "cluster_endpoint" {
 
 output "github_actions_role_arn" {
   description = "IAM role ARN for GitHub Actions (set as AWS_ROLE_STAGING secret)"
-  value       = module.github_oidc.github_actions_role_arn
+  value       = "arn:aws:iam::${var.aws_account_id}:role/eks-platform-github-actions-${var.environment}"
 }
 
 output "oidc_issuer_url" {
