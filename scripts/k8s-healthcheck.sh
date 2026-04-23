@@ -41,6 +41,113 @@ check_timeout() {
   fi
 }
 
+safe_count() {
+  local cmd="$1"
+  local out
+  if out=$(eval "$cmd" 2>/dev/null); then
+    echo "$out" | tr -d '[:space:]'
+  else
+    echo "0"
+  fi
+}
+
+kctl() {
+  kubectl --request-timeout=10s "$@"
+}
+
+aws_fallback_healthcheck() {
+  log_warn "Kubernetes API endpoint is not reachable from this runner. Falling back to AWS EKS API health checks."
+
+  # CHECK A1: Cluster status
+  log_check "AWS API: Cluster Status"
+  CLUSTER_STATUS=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" --query 'cluster.status' --output text 2>/dev/null || echo "UNKNOWN")
+  if [[ "$CLUSTER_STATUS" == "ACTIVE" ]]; then
+    pass "Cluster status is ACTIVE"
+  else
+    fail "Cluster status is $CLUSTER_STATUS"
+  fi
+
+  # CHECK A2: Endpoint access posture
+  log_check "AWS API: Endpoint Access Posture"
+  ENDPOINT_PRIVATE=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" --query 'cluster.resourcesVpcConfig.endpointPrivateAccess' --output text 2>/dev/null || echo "False")
+  if [[ "$ENDPOINT_PRIVATE" == "True" ]]; then
+    pass "Private endpoint access is enabled"
+  else
+    fail "Private endpoint access is not enabled"
+  fi
+
+  # CHECK A3: Node group discovery
+  log_check "AWS API: Node Group Discovery"
+  NODEGROUPS=$(aws eks list-nodegroups --cluster-name "$CLUSTER_NAME" --region "$AWS_REGION" --query 'nodegroups' --output text 2>/dev/null || true)
+  if [[ -n "$NODEGROUPS" && "$NODEGROUPS" != "None" ]]; then
+    pass "Node groups found: $NODEGROUPS"
+  else
+    fail "No node groups found"
+  fi
+
+  # CHECK A4/A5/A6: Node group status, desired capacity, health issues
+  log_check "AWS API: Node Group Health"
+  local ng_failed=0
+  local total_desired=0
+  if [[ -n "$NODEGROUPS" && "$NODEGROUPS" != "None" ]]; then
+    for ng in $NODEGROUPS; do
+      NG_STATUS=$(aws eks describe-nodegroup --cluster-name "$CLUSTER_NAME" --nodegroup-name "$ng" --region "$AWS_REGION" --query 'nodegroup.status' --output text 2>/dev/null || echo "UNKNOWN")
+      NG_DESIRED=$(aws eks describe-nodegroup --cluster-name "$CLUSTER_NAME" --nodegroup-name "$ng" --region "$AWS_REGION" --query 'nodegroup.scalingConfig.desiredSize' --output text 2>/dev/null || echo "0")
+      NG_ISSUES=$(aws eks describe-nodegroup --cluster-name "$CLUSTER_NAME" --nodegroup-name "$ng" --region "$AWS_REGION" --query 'length(nodegroup.health.issues)' --output text 2>/dev/null || echo "999")
+
+      total_desired=$((total_desired + NG_DESIRED))
+
+      if [[ "$NG_STATUS" != "ACTIVE" ]]; then
+        ng_failed=$((ng_failed + 1))
+        fail "Node group $ng status is $NG_STATUS"
+      fi
+
+      if [[ "$NG_ISSUES" -gt 0 ]]; then
+        ng_failed=$((ng_failed + 1))
+        fail "Node group $ng has $NG_ISSUES health issue(s)"
+      fi
+    done
+  fi
+
+  if [[ "$ng_failed" -eq 0 ]]; then
+    pass "All node groups are ACTIVE with no health issues"
+  fi
+
+  if [[ "$total_desired" -gt 0 ]]; then
+    pass "Total desired node count is $total_desired"
+  else
+    fail "Desired node count is zero"
+  fi
+
+  # CHECK A7: Core addons status
+  log_check "AWS API: Core Addons"
+  local addon_failures=0
+  for addon in coredns kube-proxy vpc-cni aws-ebs-csi-driver; do
+    if aws eks describe-addon --cluster-name "$CLUSTER_NAME" --addon-name "$addon" --region "$AWS_REGION" --query 'addon.status' --output text >/tmp/addon_status.txt 2>/dev/null; then
+      ADDON_STATUS=$(cat /tmp/addon_status.txt)
+      if [[ "$ADDON_STATUS" == "ACTIVE" ]]; then
+        pass "Addon $addon is ACTIVE"
+      else
+        addon_failures=$((addon_failures + 1))
+        fail "Addon $addon status is $ADDON_STATUS"
+      fi
+    fi
+  done
+  rm -f /tmp/addon_status.txt
+  if [[ "$addon_failures" -eq 0 ]]; then
+    pass "All detected core addons are ACTIVE"
+  fi
+
+  # CHECK A8: OIDC issuer availability
+  log_check "AWS API: OIDC Issuer"
+  OIDC_ISSUER=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" --query 'cluster.identity.oidc.issuer' --output text 2>/dev/null || true)
+  if [[ -n "$OIDC_ISSUER" && "$OIDC_ISSUER" != "None" ]]; then
+    pass "OIDC issuer is configured"
+  else
+    fail "OIDC issuer is not configured"
+  fi
+}
+
 # Helper function for future use — currently invoked via healthcheck procedures
 # shellcheck disable=SC2317
 wait_for_condition() {
@@ -61,15 +168,48 @@ wait_for_condition() {
 log_check "Node Readiness"
 check_timeout
 
-TOTAL_NODES=$(kubectl get nodes --no-headers 2>/dev/null | wc -l || echo 0)
-READY_NODES=$(kubectl get nodes --no-headers 2>/dev/null | grep -c " Ready " || echo 0)
-NOT_READY=$(kubectl get nodes --no-headers 2>/dev/null | grep -c "NotReady" || echo 0)
+if ! kctl get --raw='/readyz' >/dev/null 2>&1; then
+  aws_fallback_healthcheck
+  TOTAL=$((CHECKS_PASSED + CHECKS_FAILED))
+  ELAPSED=$(( $(date +%s) - START_TIME ))
+
+  echo ""
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  Health Check Summary — Cluster: $CLUSTER_NAME"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  echo "  Total:  $TOTAL checks"
+  echo "  Passed: $CHECKS_PASSED"
+  echo "  Failed: $CHECKS_FAILED"
+  echo "  Elapsed: ${ELAPSED}s"
+
+  if [[ ${#FAILURES[@]} -gt 0 ]]; then
+    echo ""
+    echo "  Failed checks:"
+    for f in "${FAILURES[@]}"; do
+      echo "    - $f"
+    done
+  fi
+
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  if [[ "$CHECKS_FAILED" -gt 0 ]]; then
+    log_error "Health check FAILED with $CHECKS_FAILED failure(s)"
+    exit 1
+  fi
+
+  log_info "All health checks PASSED (AWS API fallback mode)"
+  exit 0
+fi
+
+TOTAL_NODES=$(safe_count "kctl get nodes --no-headers | wc -l")
+READY_NODES=$(safe_count "kctl get nodes --no-headers | grep -c ' Ready '")
+NOT_READY=$(safe_count "kctl get nodes --no-headers | grep -c 'NotReady'")
 
 if [[ "$TOTAL_NODES" -eq 0 ]]; then
   fail "No nodes found in cluster"
 elif [[ "$NOT_READY" -gt 0 ]]; then
   fail "$NOT_READY/$TOTAL_NODES nodes are NotReady"
-  kubectl get nodes --no-headers | grep NotReady
+  kctl get nodes --no-headers | grep NotReady
 else
   pass "All $READY_NODES/$TOTAL_NODES nodes are Ready"
 fi
@@ -88,9 +228,9 @@ CRITICAL_DEPLOYMENTS=(
 )
 
 for deploy in "${CRITICAL_DEPLOYMENTS[@]}"; do
-  if kubectl get deployment "$deploy" -n kube-system &>/dev/null; then
-    DESIRED=$(kubectl get deployment "$deploy" -n kube-system -o jsonpath='{.spec.replicas}')
-    READY=$(kubectl get deployment "$deploy" -n kube-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)
+  if kctl get deployment "$deploy" -n kube-system &>/dev/null; then
+    DESIRED=$(kctl get deployment "$deploy" -n kube-system -o jsonpath='{.spec.replicas}')
+    READY=$(kctl get deployment "$deploy" -n kube-system -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo 0)
     if [[ "${READY:-0}" -ge "${DESIRED:-1}" ]]; then
       pass "Deployment $deploy: $READY/$DESIRED ready"
     else
@@ -104,9 +244,9 @@ done
 # Check DaemonSets
 CRITICAL_DAEMONSETS=("aws-node" "kube-proxy")
 for ds in "${CRITICAL_DAEMONSETS[@]}"; do
-  if kubectl get daemonset "$ds" -n kube-system &>/dev/null; then
-    DESIRED=$(kubectl get daemonset "$ds" -n kube-system -o jsonpath='{.status.desiredNumberScheduled}')
-    READY=$(kubectl get daemonset "$ds" -n kube-system -o jsonpath='{.status.numberReady}' 2>/dev/null || echo 0)
+  if kctl get daemonset "$ds" -n kube-system &>/dev/null; then
+    DESIRED=$(kctl get daemonset "$ds" -n kube-system -o jsonpath='{.status.desiredNumberScheduled}')
+    READY=$(kctl get daemonset "$ds" -n kube-system -o jsonpath='{.status.numberReady}' 2>/dev/null || echo 0)
     if [[ "${READY:-0}" -ge "${DESIRED:-1}" ]]; then
       pass "DaemonSet $ds: $READY/$DESIRED ready"
     else
@@ -122,7 +262,7 @@ log_check "DNS Resolution"
 check_timeout
 
 DNS_TEST_POD="dns-test-$$"
-DNS_RESULT=$(kubectl run "$DNS_TEST_POD" \
+DNS_RESULT=$(kctl run "$DNS_TEST_POD" \
   --image=busybox:1.28 \
   --restart=Never \
   --rm \
@@ -137,7 +277,7 @@ else
 fi
 
 # Cleanup stale pod if any
-kubectl delete pod "$DNS_TEST_POD" --ignore-not-found &>/dev/null || true
+kctl delete pod "$DNS_TEST_POD" --ignore-not-found &>/dev/null || true
 
 # ──────────────────────────────────────────────
 # CHECK 4: Ingress Connectivity
@@ -145,7 +285,7 @@ kubectl delete pod "$DNS_TEST_POD" --ignore-not-found &>/dev/null || true
 log_check "Ingress Controller (AWS LBC)"
 check_timeout
 
-LBC_ENDPOINT=$(kubectl get deployment aws-load-balancer-controller \
+LBC_ENDPOINT=$(kctl get deployment aws-load-balancer-controller \
   -n kube-system \
   -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || echo "False")
 
@@ -161,7 +301,7 @@ fi
 log_check "EBS CSI Driver"
 check_timeout
 
-EBS_CSI=$(kubectl get deployment ebs-csi-controller -n kube-system \
+EBS_CSI=$(kctl get deployment ebs-csi-controller -n kube-system \
   -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
 
 if [[ "${EBS_CSI:-0}" -ge 1 ]]; then
@@ -176,7 +316,7 @@ fi
 log_check "Pod Scheduling Across Nodes"
 check_timeout
 
-SCHEDULABLE=$(kubectl get nodes --no-headers | grep -vc "SchedulingDisabled")
+SCHEDULABLE=$(kctl get nodes --no-headers | grep -vc "SchedulingDisabled")
 if [[ "$SCHEDULABLE" -gt 1 ]]; then
   pass "Multiple nodes schedulable: $SCHEDULABLE"
 else
@@ -189,9 +329,9 @@ fi
 log_check "VPC CNI Health"
 check_timeout
 
-CNI_DESIRED=$(kubectl get daemonset aws-node -n kube-system \
+CNI_DESIRED=$(kctl get daemonset aws-node -n kube-system \
   -o jsonpath='{.status.desiredNumberScheduled}' 2>/dev/null || echo "0")
-CNI_READY=$(kubectl get daemonset aws-node -n kube-system \
+CNI_READY=$(kctl get daemonset aws-node -n kube-system \
   -o jsonpath='{.status.numberReady}' 2>/dev/null || echo "0")
 
 if [[ "${CNI_READY:-0}" -eq "${CNI_DESIRED:-0}" ]] && [[ "${CNI_DESIRED:-0}" -gt 0 ]]; then
@@ -206,7 +346,7 @@ fi
 log_check "No CrashLoopBackOff Pods"
 check_timeout
 
-CRASHLOOP_PODS=$(kubectl get pods -n kube-system \
+CRASHLOOP_PODS=$(kctl get pods -n kube-system \
   --field-selector=status.phase!=Succeeded \
   -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.containerStatuses[*]}{.state.waiting.reason}{"\n"}{end}{end}' 2>/dev/null \
   | grep -c "CrashLoopBackOff" || echo 0)
@@ -215,7 +355,7 @@ if [[ "$CRASHLOOP_PODS" -eq 0 ]]; then
   pass "No CrashLoopBackOff pods in kube-system"
 else
   fail "$CRASHLOOP_PODS pod(s) in CrashLoopBackOff in kube-system"
-  kubectl get pods -n kube-system | grep CrashLoopBackOff || true
+  kctl get pods -n kube-system | grep CrashLoopBackOff || true
 fi
 
 # ──────────────────────────────────────────────
