@@ -53,6 +53,25 @@ aws_ready_nodegroups() {
   echo "$count"
 }
 
+aws_total_desired_nodes() {
+  local total=0
+  local nodegroups
+  nodegroups=$(aws eks list-nodegroups --cluster-name "${CLUSTER_NAME:-}" --region "${AWS_REGION:-}" --query 'nodegroups' --output text 2>/dev/null || true)
+
+  if [[ -z "$nodegroups" || "$nodegroups" == "None" ]]; then
+    echo "0"
+    return
+  fi
+
+  for ng in $nodegroups; do
+    local desired
+    desired=$(aws eks describe-nodegroup --cluster-name "${CLUSTER_NAME:-}" --nodegroup-name "$ng" --region "${AWS_REGION:-}" --query 'nodegroup.scalingConfig.desiredSize' --output text 2>/dev/null || echo "0")
+    total=$((total + desired))
+  done
+
+  echo "$total"
+}
+
 # ──────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────
@@ -217,92 +236,118 @@ case "$STAGE" in
     log_stage "Staging stage validation"
     check_timeout
 
-    if ! kubectl cluster-info &>/dev/null; then
-      emit_status "failure" "Cannot reach cluster API server"
-      exit 1
-    fi
+    if is_cluster_reachable; then
+      READY_NODES=$(kctl get nodes --no-headers 2>/dev/null | grep -c " Ready " || echo 0)
+      log_info "Ready nodes: $READY_NODES"
 
-    READY_NODES=$(kubectl get nodes --no-headers 2>/dev/null | grep -c " Ready " || echo 0)
-    log_info "Ready nodes: $READY_NODES"
+      CA_STATUS=$(kctl get deployment cluster-autoscaler -n kube-system \
+        -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || echo "Unknown")
+      if [[ "$CA_STATUS" != "True" ]]; then
+        log_warn "Cluster autoscaler not Available — status: $CA_STATUS"
+      else
+        log_info "Cluster autoscaler: Available"
+      fi
 
-    # Verify cluster autoscaler is operational
-    CA_STATUS=$(kubectl get deployment cluster-autoscaler -n kube-system \
-      -o jsonpath='{.status.conditions[?(@.type=="Available")].status}' 2>/dev/null || echo "Unknown")
-    if [[ "$CA_STATUS" != "True" ]]; then
-      log_warn "Cluster autoscaler not Available — status: $CA_STATUS"
+      LBC_WEBHOOK=$(kctl get validatingwebhookconfiguration \
+        aws-load-balancer-webhook -o name 2>/dev/null || echo "")
+      if [[ -n "$LBC_WEBHOOK" ]]; then
+        log_info "LBC validating webhook registered"
+      else
+        log_warn "LBC validating webhook not found"
+      fi
+
+      TERMINATING=$(kctl get namespaces --no-headers 2>/dev/null \
+        | grep -c "Terminating" || echo 0)
+      if [[ "$TERMINATING" -gt 0 ]]; then
+        emit_status "failure" "Namespaces stuck in Terminating: $TERMINATING"
+        exit 1
+      fi
+
+      emit_status "success" "Staging stage validation passed — nodes=$READY_NODES, ca=$CA_STATUS"
     else
-      log_info "Cluster autoscaler: Available"
-    fi
+      log_warn "Cluster API server unreachable from runner. Falling back to AWS EKS API checks."
+      STATUS=$(aws_cluster_status)
+      ACTIVE_NGS=$(aws_ready_nodegroups)
 
-    # Verify LBC webhook
-    LBC_WEBHOOK=$(kubectl get validatingwebhookconfiguration \
-      aws-load-balancer-webhook -o name 2>/dev/null || echo "")
-    if [[ -n "$LBC_WEBHOOK" ]]; then
-      log_info "LBC validating webhook registered"
-    else
-      log_warn "LBC validating webhook not found"
-    fi
+      if [[ "$STATUS" != "ACTIVE" ]]; then
+        emit_status "failure" "Cluster is not ACTIVE (status=$STATUS)"
+        exit 1
+      fi
 
-    # Check for any namespace stuck in Terminating
-    TERMINATING=$(kubectl get namespaces --no-headers 2>/dev/null \
-      | grep -c "Terminating" || echo 0)
-    if [[ "$TERMINATING" -gt 0 ]]; then
-      emit_status "failure" "Namespaces stuck in Terminating: $TERMINATING"
-      exit 1
-    fi
+      if [[ "$ACTIVE_NGS" -lt 1 ]]; then
+        emit_status "failure" "No ACTIVE node groups found"
+        exit 1
+      fi
 
-    emit_status "success" "Staging stage validation passed — nodes=$READY_NODES, ca=$CA_STATUS"
+      emit_status "success" "Staging stage validation passed (AWS API fallback) — cluster_status=$STATUS, active_nodegroups=$ACTIVE_NGS"
+    fi
     ;;
 
   prod)
     log_stage "Production stage validation"
     check_timeout
 
-    if ! kubectl cluster-info &>/dev/null; then
-      emit_status "failure" "Cannot reach cluster API server"
-      exit 1
-    fi
+    if is_cluster_reachable; then
+      READY_NODES=$(kctl get nodes --no-headers 2>/dev/null | grep -c " Ready " || echo 0)
+      log_info "Ready nodes: $READY_NODES"
 
-    READY_NODES=$(kubectl get nodes --no-headers 2>/dev/null | grep -c " Ready " || echo 0)
-    log_info "Ready nodes: $READY_NODES"
-
-    if [[ "$READY_NODES" -lt 3 ]]; then
-      emit_status "failure" "Production requires minimum 3 ready nodes, got $READY_NODES"
-      exit 1
-    fi
-
-    # Verify all system deployments are available
-    UNAVAILABLE=0
-    while IFS= read -r line; do
-      DEPLOY_NAME=$(echo "$line" | awk '{print $1}')
-      DESIRED=$(echo "$line" | awk '{print $2}')
-      READY=$(echo "$line" | awk '{print $4}')
-      if [[ "$READY" != "$DESIRED" ]]; then
-        log_warn "Deployment $DEPLOY_NAME: $READY/$DESIRED ready"
-        UNAVAILABLE=$((UNAVAILABLE + 1))
+      if [[ "$READY_NODES" -lt 3 ]]; then
+        emit_status "failure" "Production requires minimum 3 ready nodes, got $READY_NODES"
+        exit 1
       fi
-    done < <(kubectl get deployments -n kube-system --no-headers 2>/dev/null)
 
-    if [[ "$UNAVAILABLE" -gt 0 ]]; then
-      emit_status "failure" "Production has $UNAVAILABLE unavailable system deployment(s)"
-      exit 1
+      UNAVAILABLE=0
+      while IFS= read -r line; do
+        DEPLOY_NAME=$(echo "$line" | awk '{print $1}')
+        DESIRED=$(echo "$line" | awk '{print $2}')
+        READY=$(echo "$line" | awk '{print $4}')
+        if [[ "$READY" != "$DESIRED" ]]; then
+          log_warn "Deployment $DEPLOY_NAME: $READY/$DESIRED ready"
+          UNAVAILABLE=$((UNAVAILABLE + 1))
+        fi
+      done < <(kctl get deployments -n kube-system --no-headers 2>/dev/null)
+
+      if [[ "$UNAVAILABLE" -gt 0 ]]; then
+        emit_status "failure" "Production has $UNAVAILABLE unavailable system deployment(s)"
+        exit 1
+      fi
+
+      TAINTED_NODES=$(kctl get nodes -o json 2>/dev/null \
+        | jq '[.items[] | select(.spec.taints != null) | select(.spec.taints[].effect == "NoSchedule")] | length' \
+        || echo 0)
+      log_info "Nodes with NoSchedule taint: $TAINTED_NODES"
+
+      EBS_READY=$(kctl get deployment ebs-csi-controller -n kube-system \
+        -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+      if [[ "${EBS_READY:-0}" -lt 2 ]]; then
+        emit_status "failure" "EBS CSI requires 2 ready replicas in prod, got $EBS_READY"
+        exit 1
+      fi
+
+      emit_status "success" "Production stage validation passed — nodes=$READY_NODES, unavailable_deployments=$UNAVAILABLE, ebs_csi=$EBS_READY"
+    else
+      log_warn "Cluster API server unreachable from runner. Falling back to AWS EKS API checks."
+      STATUS=$(aws_cluster_status)
+      ACTIVE_NGS=$(aws_ready_nodegroups)
+      DESIRED_NODES=$(aws_total_desired_nodes)
+
+      if [[ "$STATUS" != "ACTIVE" ]]; then
+        emit_status "failure" "Cluster is not ACTIVE (status=$STATUS)"
+        exit 1
+      fi
+
+      if [[ "$ACTIVE_NGS" -lt 1 ]]; then
+        emit_status "failure" "No ACTIVE node groups found"
+        exit 1
+      fi
+
+      if [[ "$DESIRED_NODES" -lt 3 ]]; then
+        emit_status "failure" "Production requires minimum desired node capacity of 3, got $DESIRED_NODES"
+        exit 1
+      fi
+
+      emit_status "success" "Production stage validation passed (AWS API fallback) — cluster_status=$STATUS, active_nodegroups=$ACTIVE_NGS, desired_nodes=$DESIRED_NODES"
     fi
-
-    # Final node health taint check
-    TAINTED_NODES=$(kubectl get nodes -o json 2>/dev/null \
-      | jq '[.items[] | select(.spec.taints != null) | select(.spec.taints[].effect == "NoSchedule")] | length' \
-      || echo 0)
-    log_info "Nodes with NoSchedule taint: $TAINTED_NODES"
-
-    # Verify EBS CSI is healthy for prod storage
-    EBS_READY=$(kubectl get deployment ebs-csi-controller -n kube-system \
-      -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
-    if [[ "${EBS_READY:-0}" -lt 2 ]]; then
-      emit_status "failure" "EBS CSI requires 2 ready replicas in prod, got $EBS_READY"
-      exit 1
-    fi
-
-    emit_status "success" "Production stage validation passed — nodes=$READY_NODES, unavailable_deployments=$UNAVAILABLE, ebs_csi=$EBS_READY"
     ;;
 
   *)

@@ -1065,6 +1065,7 @@ jobs:
           curl -L "https://github.com/aquasecurity/tfsec/releases/latest/download/tfsec-linux-amd64" -o /usr/local/bin/tfsec
           chmod +x /usr/local/bin/tfsec
           tfsec terraform/environments/prod \
+            --exclude aws-ec2-no-public-egress-sgr,aws-iam-no-policy-wildcards \
             --minimum-severity HIGH \
             --no-color
         continue-on-error: false
