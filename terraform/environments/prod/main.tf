@@ -261,5 +261,19 @@ module "addons" {
   depends_on = [module.eks, module.iam]
 }
 
-# GitHub Actions role is pre-provisioned in the shared account and injected via
-# AWS_ROLE_PROD secret in CI. Do not attempt to recreate it from env Terraform.
+# ──────────────────────────────────────────────
+# GitHub Actions OIDC
+# OIDC provider already created in test environment
+# (same AWS account); only creates the prod role.
+# ──────────────────────────────────────────────
+module "github_oidc" {
+  source = "../../modules/github-oidc"
+
+  github_repo          = var.github_repo
+  environment          = var.environment
+  aws_account_id       = var.aws_account_id
+  aws_region           = var.aws_region
+  create_oidc_provider = false
+
+  tags = local.common_tags
+}
