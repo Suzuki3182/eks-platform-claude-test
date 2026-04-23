@@ -483,11 +483,11 @@ jobs:
           STATUS="success"
           APPLY_STATUS="failure"
 
-          if [[ "${{ steps.plan.outputs.has_changes }}" == "true" ]] && [[ "${{ steps.apply.outcome }}" == "success" ]]; then
+          if [[ "${{ steps.apply.outcome }}" == "success" ]]; then
             APPLY_STATUS="success"
           fi
 
-          if [[ "${{ steps.plan.outputs.has_changes }}" != "true" ]] && [[ "${{ steps.apply_no_changes.outcome }}" == "success" ]]; then
+          if [[ "${{ steps.apply_no_changes.outcome }}" == "success" ]]; then
             APPLY_STATUS="success"
           fi
 
