@@ -97,6 +97,41 @@ resource "aws_kms_key" "eks" {
         Principal = { Service = "logs.${var.aws_region}.amazonaws.com" }
         Action    = ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:DescribeKey"]
         Resource  = "*"
+      },
+      {
+        Sid       = "AllowEC2EBSUse"
+        Effect    = "Allow"
+        Principal = { AWS = "*" }
+        Action    = ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:CreateGrant", "kms:DescribeKey"]
+        Resource  = "*"
+        Condition = {
+          StringEquals = {
+            "kms:CallerAccount" = var.aws_account_id
+            "kms:ViaService"    = "ec2.${var.aws_region}.amazonaws.com"
+          }
+          Bool = {
+            "kms:GrantIsForAWSResource" = true
+          }
+        }
+      },
+      {
+        Sid       = "AllowAutoScalingServiceRoleUse"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::${var.aws_account_id}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling" }
+        Action    = ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:DescribeKey"]
+        Resource  = "*"
+      },
+      {
+        Sid       = "AllowAutoScalingServiceRoleGrant"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:aws:iam::${var.aws_account_id}:role/aws-service-role/autoscaling.amazonaws.com/AWSServiceRoleForAutoScaling" }
+        Action    = ["kms:CreateGrant"]
+        Resource  = "*"
+        Condition = {
+          Bool = {
+            "kms:GrantIsForAWSResource" = true
+          }
+        }
       }
     ]
   })
