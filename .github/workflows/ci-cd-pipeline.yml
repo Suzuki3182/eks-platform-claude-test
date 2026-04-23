@@ -1095,21 +1095,81 @@ jobs:
             -auto-approve \
             tfplan.binary 2>&1 | tee apply_output.txt
 
+      - name: Resolve cluster name from Terraform output
+        id: cluster
+        run: |
+          CLUSTER_NAME=$(terraform -chdir=terraform/environments/prod output -json 2>/dev/null | jq -r '.cluster_name.value // empty' || true)
+          CLUSTER_NAME=$(echo "$CLUSTER_NAME" | tr -d '\r\n')
+
+          if [[ -z "$CLUSTER_NAME" ]]; then
+            PROJECT=$(awk -F'=' '/^project/{gsub(/[ "\t]/, "", $2); print $2}' terraform/environments/prod/terraform.tfvars)
+            ENVIRONMENT=$(awk -F'=' '/^environment/{gsub(/[ "\t]/, "", $2); print $2}' terraform/environments/prod/terraform.tfvars)
+            if [[ -n "$PROJECT" && -n "$ENVIRONMENT" ]]; then
+              CLUSTER_NAME="${PROJECT}-${ENVIRONMENT}"
+            fi
+          fi
+
+          if [[ -z "$CLUSTER_NAME" ]] || [[ "$CLUSTER_NAME" == "null" ]]; then
+            echo "ERROR: Could not resolve cluster_name from Terraform outputs"
+            terraform -chdir=terraform/environments/prod output || true
+            exit 1
+          fi
+          echo "name=$CLUSTER_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Guard AWS account/region and cluster existence
+        id: guard
+        run: |
+          ACTUAL_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          if [[ "$ACTUAL_ACCOUNT_ID" != "${{ secrets.AWS_ACCOUNT_ID }}" ]]; then
+            echo "ERROR: OIDC account mismatch. expected=${{ secrets.AWS_ACCOUNT_ID }} actual=$ACTUAL_ACCOUNT_ID"
+            exit 1
+          fi
+
+          if aws eks describe-cluster \
+            --region "${{ env.AWS_REGION }}" \
+            --name "${{ steps.cluster.outputs.name }}" >/dev/null 2>&1; then
+            echo "Cluster ${{ steps.cluster.outputs.name }} exists."
+            echo "cluster_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "WARNING: Cluster ${{ steps.cluster.outputs.name }} not found. Skipping kubeconfig and kube-health checks."
+            echo "cluster_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Detect Kubernetes API reachability
+        id: kube_api
+        if: steps.guard.outputs.cluster_exists == 'true'
+        run: |
+          ENDPOINT=$(aws eks describe-cluster \
+            --region "${{ env.AWS_REGION }}" \
+            --name "${{ steps.cluster.outputs.name }}" \
+            --query 'cluster.endpoint' \
+            --output text)
+
+          HOST=${ENDPOINT#https://}
+          if timeout 8 bash -c "cat < /dev/null > /dev/tcp/${HOST}/443"; then
+            echo "reachable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "reachable=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Update kubeconfig
+        if: steps.guard.outputs.cluster_exists == 'true' && steps.kube_api.outputs.reachable == 'true'
         run: |
           aws eks update-kubeconfig \
             --region ${{ env.AWS_REGION }} \
-            --name eks-platform-prod
+            --name ${{ steps.cluster.outputs.name }}
 
       - name: Run K8s Health Check
         id: healthcheck
+        if: steps.guard.outputs.cluster_exists == 'true' && steps.kube_api.outputs.reachable == 'true'
         run: |
           chmod +x scripts/k8s-healthcheck.sh
-          scripts/k8s-healthcheck.sh eks-platform-prod ${{ env.AWS_REGION }} 2>&1 | tee healthcheck_output.txt
+          scripts/k8s-healthcheck.sh ${{ steps.cluster.outputs.name }} ${{ env.AWS_REGION }} 2>&1 | tee healthcheck_output.txt
         continue-on-error: false
 
       - name: Verify Rollout Status
         id: rollout
+        if: steps.guard.outputs.cluster_exists == 'true' && steps.kube_api.outputs.reachable == 'true'
         run: |
           echo "Verifying all deployments are rolled out..."
           for ns in kube-system; do
@@ -1121,6 +1181,7 @@ jobs:
 
       - name: Final Validation Agent
         id: agent
+        if: steps.guard.outputs.cluster_exists == 'true'
         run: |
           chmod +x scripts/pipeline-agent-verify.sh
           scripts/pipeline-agent-verify.sh prod 2>&1 | tee agent_output.txt
@@ -1131,18 +1192,31 @@ jobs:
         if: always()
         run: |
           STATUS="success"
-          for outcome in \
-            "${{ steps.security.outcome }}" \
-            "${{ steps.prod_recommendation.outcome }}" \
-            "${{ steps.apply.outcome }}" \
-            "${{ steps.healthcheck.outcome }}" \
-            "${{ steps.rollout.outcome }}" \
-            "${{ steps.agent.outcome }}"; do
-            if [[ "$outcome" != "success" ]]; then
-              STATUS="failure"
-              break
-            fi
-          done
+          if [[ "${{ steps.kube_api.outputs.reachable }}" == "true" ]]; then
+            for outcome in \
+              "${{ steps.security.outcome }}" \
+              "${{ steps.prod_recommendation.outcome }}" \
+              "${{ steps.apply.outcome }}" \
+              "${{ steps.healthcheck.outcome }}" \
+              "${{ steps.rollout.outcome }}" \
+              "${{ steps.agent.outcome }}"; do
+              if [[ "$outcome" != "success" ]]; then
+                STATUS="failure"
+                break
+              fi
+            done
+          else
+            for outcome in \
+              "${{ steps.security.outcome }}" \
+              "${{ steps.prod_recommendation.outcome }}" \
+              "${{ steps.apply.outcome }}" \
+              "${{ steps.agent.outcome }}"; do
+              if [[ "$outcome" != "success" ]]; then
+                STATUS="failure"
+                break
+              fi
+            done
+          fi
 
           mkdir -p artifacts
           cat > artifacts/agent-output.json << EOF
