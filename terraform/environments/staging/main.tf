@@ -248,6 +248,33 @@ module "addons" {
 }
 
 # ──────────────────────────────────────────────
+# Datadog Observability
+# ──────────────────────────────────────────────
+module "datadog" {
+  source = "../../modules/datadog"
+
+  cluster_name      = local.cluster_name
+  environment       = var.environment
+  aws_region        = var.aws_region
+  aws_account_id    = var.aws_account_id
+  oidc_provider_arn = module.eks.oidc_provider_arn
+  oidc_issuer_url   = module.eks.oidc_issuer_url
+  datadog_api_key   = var.datadog_api_key
+  datadog_app_key   = var.datadog_app_key
+  datadog_site      = var.datadog_site
+
+  cluster_agent_replicas    = 2
+  enable_apm                = true
+  enable_logs               = true
+  enable_npm                = false
+  enable_process_monitoring = true
+
+  tags = local.common_tags
+
+  depends_on = [module.addons]
+}
+
+# ──────────────────────────────────────────────
 # GitHub Actions OIDC
 # OIDC provider already created in test environment
 # (same AWS account); only creates the staging role.

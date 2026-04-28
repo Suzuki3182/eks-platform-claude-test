@@ -359,6 +359,59 @@ else
 fi
 
 # ──────────────────────────────────────────────
+# CHECK 9: Datadog Observability Stack
+# Hard failure when namespace exists; warn-only when not yet deployed.
+# ──────────────────────────────────────────────
+log_check "Datadog Observability Stack"
+check_timeout
+
+if kctl get namespace datadog &>/dev/null; then
+  # Agent DaemonSet
+  DD_DESIRED=$(kctl get daemonset datadog -n datadog \
+    -o jsonpath='{.status.desiredNumberScheduled}' 2>/dev/null || echo "0")
+  DD_READY=$(kctl get daemonset datadog -n datadog \
+    -o jsonpath='{.status.numberReady}' 2>/dev/null || echo "0")
+  if [[ "${DD_DESIRED:-0}" -gt 0 ]]; then
+    if [[ "${DD_READY:-0}" -ge "${DD_DESIRED}" ]]; then
+      pass "Datadog Agent DaemonSet: $DD_READY/$DD_DESIRED ready"
+    else
+      fail "Datadog Agent DaemonSet: only $DD_READY/$DD_DESIRED ready"
+    fi
+  else
+    fail "Datadog Agent DaemonSet: desiredNumberScheduled is 0 or DaemonSet not found"
+  fi
+
+  # Cluster Agent Deployment
+  DCA_DESIRED=$(kctl get deployment datadog-cluster-agent -n datadog \
+    -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
+  DCA_READY=$(kctl get deployment datadog-cluster-agent -n datadog \
+    -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
+  if [[ "${DCA_DESIRED:-0}" -gt 0 ]]; then
+    if [[ "${DCA_READY:-0}" -ge "${DCA_DESIRED}" ]]; then
+      pass "Datadog Cluster Agent: $DCA_READY/$DCA_DESIRED ready"
+    else
+      fail "Datadog Cluster Agent: only $DCA_READY/$DCA_DESIRED ready"
+    fi
+  else
+    fail "Datadog Cluster Agent: desired replicas is 0 or Deployment not found"
+  fi
+
+  # No CrashLoopBackOff in datadog namespace
+  DD_CRASHLOOP=$(kctl get pods -n datadog \
+    --field-selector=status.phase!=Succeeded \
+    -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.containerStatuses[*]}{.state.waiting.reason}{"\n"}{end}{end}' 2>/dev/null \
+    | grep -c "CrashLoopBackOff" || echo 0)
+  if [[ "$DD_CRASHLOOP" -eq 0 ]]; then
+    pass "No CrashLoopBackOff pods in datadog namespace"
+  else
+    fail "$DD_CRASHLOOP Datadog pod(s) in CrashLoopBackOff"
+    kctl get pods -n datadog | grep CrashLoopBackOff || true
+  fi
+else
+  log_warn "Datadog namespace not found — skipping Datadog health checks (not yet deployed)"
+fi
+
+# ──────────────────────────────────────────────
 # Final Summary
 # ──────────────────────────────────────────────
 TOTAL=$((CHECKS_PASSED + CHECKS_FAILED))
