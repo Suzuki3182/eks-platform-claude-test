@@ -63,6 +63,7 @@ if [[ -f "$ADDONS_TF" ]]; then
     if command -v aws &>/dev/null && aws sts get-caller-identity &>/dev/null 2>&1; then
       CLUSTER_VERSION=$(aws eks list-clusters --region "$AWS_REGION" --output text 2>/dev/null | head -1 || echo "")
       if [[ -n "$CLUSTER_VERSION" ]]; then
+        # shellcheck disable=SC2016
         latest_ver=$(aws eks describe-addon-versions \
           --region "$AWS_REGION" \
           --addon-name "$addon_name" \

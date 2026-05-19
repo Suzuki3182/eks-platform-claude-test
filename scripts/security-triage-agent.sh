@@ -82,7 +82,6 @@ classify_finding() {
 
 # ── Process tfsec results ─────────────────────────────────────────────────────
 log "Processing tfsec results: $TFSEC_FILE"
-TFSEC_FINDINGS="[]"
 
 if [[ -f "$TFSEC_FILE" ]]; then
   TFSEC_RESULT_COUNT=$(jq '[.results // []] | flatten | length' "$TFSEC_FILE" 2>/dev/null || echo "0")

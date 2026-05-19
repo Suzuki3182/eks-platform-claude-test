@@ -137,7 +137,7 @@ for ns in $NAMESPACES; do
 
     if [[ "$pod_status" == "CrashLoopBackOff" ]] || \
        [[ "$pod_status" == "OOMKilled" ]] || \
-       ([[ "$pod_status" == "Error" ]] && [[ "$restart_count" -gt 5 ]]); then
+       { [[ "$pod_status" == "Error" ]] && [[ "$restart_count" -gt 5 ]]; }; then
 
       log "UNHEALTHY POD: $ns/$pod_name (status=$pod_status restarts=$restart_count)"
 

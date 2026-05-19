@@ -99,7 +99,7 @@ for env in "${ENVS[@]}"; do
     -var="app_image_tag=latest" \
     -no-color \
     -detailed-exitcode \
-    2>&1 > "$PLAN_OUT"
+    > "$PLAN_OUT" 2>&1
   PLAN_EXIT=$?
   set -e
 
