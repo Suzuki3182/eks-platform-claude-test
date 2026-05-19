@@ -359,56 +359,41 @@ else
 fi
 
 # ──────────────────────────────────────────────
-# CHECK 9: Datadog Observability Stack
+# CHECK 9: TypeScript Application
 # Hard failure when namespace exists; warn-only when not yet deployed.
 # ──────────────────────────────────────────────
-log_check "Datadog Observability Stack"
+log_check "TypeScript Application"
 check_timeout
 
-if kctl get namespace datadog &>/dev/null; then
-  # Agent DaemonSet
-  DD_DESIRED=$(kctl get daemonset datadog -n datadog \
-    -o jsonpath='{.status.desiredNumberScheduled}' 2>/dev/null || echo "0")
-  DD_READY=$(kctl get daemonset datadog -n datadog \
-    -o jsonpath='{.status.numberReady}' 2>/dev/null || echo "0")
-  if [[ "${DD_DESIRED:-0}" -gt 0 ]]; then
-    if [[ "${DD_READY:-0}" -ge "${DD_DESIRED}" ]]; then
-      pass "Datadog Agent DaemonSet: $DD_READY/$DD_DESIRED ready"
-    else
-      fail "Datadog Agent DaemonSet: only $DD_READY/$DD_DESIRED ready"
-    fi
-  else
-    fail "Datadog Agent DaemonSet: desiredNumberScheduled is 0 or DaemonSet not found"
-  fi
-
-  # Cluster Agent Deployment
-  DCA_DESIRED=$(kctl get deployment datadog-cluster-agent -n datadog \
+if kctl get namespace app &>/dev/null; then
+  # Deployment ready
+  APP_DESIRED=$(kctl get deployment typescript-app -n app \
     -o jsonpath='{.spec.replicas}' 2>/dev/null || echo "0")
-  DCA_READY=$(kctl get deployment datadog-cluster-agent -n datadog \
+  APP_READY=$(kctl get deployment typescript-app -n app \
     -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0")
-  if [[ "${DCA_DESIRED:-0}" -gt 0 ]]; then
-    if [[ "${DCA_READY:-0}" -ge "${DCA_DESIRED}" ]]; then
-      pass "Datadog Cluster Agent: $DCA_READY/$DCA_DESIRED ready"
+  if [[ "${APP_DESIRED:-0}" -gt 0 ]]; then
+    if [[ "${APP_READY:-0}" -ge "${APP_DESIRED}" ]]; then
+      pass "TypeScript App Deployment: $APP_READY/$APP_DESIRED ready"
     else
-      fail "Datadog Cluster Agent: only $DCA_READY/$DCA_DESIRED ready"
+      fail "TypeScript App Deployment: only $APP_READY/$APP_DESIRED ready"
     fi
   else
-    fail "Datadog Cluster Agent: desired replicas is 0 or Deployment not found"
+    fail "TypeScript App Deployment: desired replicas is 0 or Deployment not found"
   fi
 
-  # No CrashLoopBackOff in datadog namespace
-  DD_CRASHLOOP=$(kctl get pods -n datadog \
+  # No CrashLoopBackOff in app namespace
+  APP_CRASHLOOP=$(kctl get pods -n app \
     --field-selector=status.phase!=Succeeded \
     -o jsonpath='{range .items[*]}{.metadata.name}{" "}{range .status.containerStatuses[*]}{.state.waiting.reason}{"\n"}{end}{end}' 2>/dev/null \
     | grep -c "CrashLoopBackOff" || echo 0)
-  if [[ "$DD_CRASHLOOP" -eq 0 ]]; then
-    pass "No CrashLoopBackOff pods in datadog namespace"
+  if [[ "$APP_CRASHLOOP" -eq 0 ]]; then
+    pass "No CrashLoopBackOff pods in app namespace"
   else
-    fail "$DD_CRASHLOOP Datadog pod(s) in CrashLoopBackOff"
-    kctl get pods -n datadog | grep CrashLoopBackOff || true
+    fail "$APP_CRASHLOOP app pod(s) in CrashLoopBackOff"
+    kctl get pods -n app | grep CrashLoopBackOff || true
   fi
 else
-  log_warn "Datadog namespace not found — skipping Datadog health checks (not yet deployed)"
+  log_warn "app namespace not found — skipping TypeScript app health checks (not yet deployed)"
 fi
 
 # ──────────────────────────────────────────────

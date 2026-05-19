@@ -30,10 +30,9 @@ env:
   AWS_REGION: 'us-east-1'
   TF_IN_AUTOMATION: 'true'
   TF_INPUT: 'false'
-  DD_SITE: 'datadoghq.com'
 
 # ──────────────────────────────────────────────
-# Stage 1: Build — fmt, init, validate, lint, unit tests
+# Stage 1: Build — fmt, init, validate, lint, app build check
 # ──────────────────────────────────────────────
 jobs:
   build:
@@ -96,6 +95,14 @@ jobs:
           sudo apt-get install -y shellcheck
           shellcheck scripts/*.sh
 
+      - name: TypeScript App Build Check
+        id: app_build
+        run: |
+          cd app
+          npm ci
+          npm run build
+          echo "app_build_result=passed" >> "$GITHUB_OUTPUT"
+
       - name: Emit Build Status
         id: emit
         if: always()
@@ -103,7 +110,8 @@ jobs:
           STATUS="success"
           if [[ "${{ steps.fmt.outcome }}" != "success" ]] || \
              [[ "${{ steps.validate.outcome }}" != "success" ]] || \
-             [[ "${{ steps.tflint.outcome }}" != "success" ]]; then
+             [[ "${{ steps.tflint.outcome }}" != "success" ]] || \
+             [[ "${{ steps.app_build.outcome }}" != "success" ]]; then
             STATUS="failure"
           fi
 
@@ -112,7 +120,7 @@ jobs:
           {
             "stage": "build",
             "status": "$STATUS",
-            "reason": "fmt=${{ steps.fmt.outcome }}, validate=${{ steps.validate.outcome }}, tflint=${{ steps.tflint.outcome }}",
+            "reason": "fmt=${{ steps.fmt.outcome }}, validate=${{ steps.validate.outcome }}, tflint=${{ steps.tflint.outcome }}, app_build=${{ steps.app_build.outcome }}",
             "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "commit": "${{ github.sha }}",
             "actor": "${{ github.actor }}"
@@ -272,6 +280,42 @@ jobs:
             fi
           done
 
+      - name: Bootstrap ECR & Build App Image
+        id: build_app
+        run: |
+          set -euo pipefail
+
+          ENVIRONMENT="test"
+          PROJECT=$(awk -F'=' '/^project/{gsub(/[ "\t]/, "", $2); print $2}' terraform/environments/${ENVIRONMENT}/terraform.tfvars)
+          ECR_REPO="${PROJECT}-${ENVIRONMENT}-app"
+          IMAGE_TAG="${{ github.sha }}"
+          SHORT_TAG="${IMAGE_TAG:0:8}"
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          ECR_URL="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
+
+          # Bootstrap ECR via targeted apply if not yet managed by Terraform
+          if ! aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$AWS_REGION" 2>/dev/null; then
+            echo "ECR repository not found. Creating via Terraform target..."
+            terraform -chdir=terraform/environments/${ENVIRONMENT} apply \
+              -target=module.ecr \
+              -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
+              -auto-approve
+          fi
+
+          aws ecr get-login-password --region "$AWS_REGION" | \
+            docker login --username AWS --password-stdin "$ECR_URL"
+
+          docker build \
+            --build-arg APP_VERSION="${SHORT_TAG}" \
+            -t "${ECR_URL}:${SHORT_TAG}" \
+            -t "${ECR_URL}:latest" \
+            app/
+          docker push "${ECR_URL}:${SHORT_TAG}"
+          docker push "${ECR_URL}:latest"
+
+          echo "image_tag=${SHORT_TAG}" >> "$GITHUB_OUTPUT"
+          echo "ecr_url=${ECR_URL}" >> "$GITHUB_OUTPUT"
+
       - name: Terraform Plan (test)
         id: plan
         run: |
@@ -281,8 +325,7 @@ jobs:
           set -o pipefail
           terraform -chdir=terraform/environments/test plan \
             -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
-            -var="datadog_api_key=${{ secrets.DD_API_KEY }}" \
-            -var="datadog_app_key=${{ secrets.DD_APP_KEY }}" \
+            -var="app_image_tag=${{ steps.build_app.outputs.image_tag }}" \
             -out="$PLAN_FILE" \
             -no-color \
             -detailed-exitcode 2>&1 | tee plan_output.txt
@@ -301,8 +344,7 @@ jobs:
               set -o pipefail
               terraform -chdir=terraform/environments/test plan \
                 -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
-                -var="datadog_api_key=${{ secrets.DD_API_KEY }}" \
-                -var="datadog_app_key=${{ secrets.DD_APP_KEY }}" \
+                -var="app_image_tag=${{ steps.build_app.outputs.image_tag }}" \
                 -out="$PLAN_FILE" \
                 -no-color \
                 -detailed-exitcode 2>&1 | tee plan_output.txt
@@ -377,7 +419,6 @@ jobs:
             --quiet || true
 
           FAILED=$(jq '.summary.failed' checkov-results.json 2>/dev/null || echo "0")
-          CRITICAL=$(jq '[.results.failed_checks[] | select(.check_result.result == "FAILED") | select(.check_id | startswith("CKV"))] | length' checkov-results.json 2>/dev/null || echo "0")
           echo "failed=$FAILED" >> "$GITHUB_OUTPUT"
 
           if [[ "$FAILED" -gt "0" ]]; then
@@ -474,21 +515,6 @@ jobs:
           exit $hc_exit
         continue-on-error: false
 
-      - name: Datadog Configuration Agent
-        id: datadog_agent
-        if: steps.guard.outputs.cluster_exists == 'true'
-        run: |
-          chmod +x scripts/datadog-agent.sh
-          scripts/datadog-agent.sh \
-            "${{ steps.cluster.outputs.name }}" \
-            "${{ env.AWS_REGION }}" \
-            "test" 2>&1 | tee datadog_agent_output.txt
-        continue-on-error: true
-        env:
-          DD_API_KEY: ${{ secrets.DD_API_KEY }}
-          DD_APP_KEY: ${{ secrets.DD_APP_KEY }}
-          DD_SITE: ${{ env.DD_SITE }}
-
       - name: Validation Agent
         id: agent
         run: |
@@ -524,7 +550,7 @@ jobs:
           {
             "stage": "test",
             "status": "$STATUS",
-              "reason": "tfsec=${{ steps.tfsec.outcome }}, checkov=${{ steps.checkov.outcome }}, cost_agent=${{ steps.cost_agent.outcome }}, plan_exit_code=${{ steps.plan.outputs.exit_code }}, plan_has_changes=${{ steps.plan.outputs.has_changes }}, changes_count=${{ steps.plan.outputs.changes_count }}, apply=${{ steps.apply.outcome }}, apply_no_changes=${{ steps.apply_no_changes.outcome }}, apply_effective=$APPLY_STATUS, healthcheck=${{ steps.healthcheck.outcome }}, datadog_agent=${{ steps.datadog_agent.outcome }}, agent=${{ steps.agent.outcome }}",
+              "reason": "tfsec=${{ steps.tfsec.outcome }}, checkov=${{ steps.checkov.outcome }}, cost_agent=${{ steps.cost_agent.outcome }}, plan_exit_code=${{ steps.plan.outputs.exit_code }}, plan_has_changes=${{ steps.plan.outputs.has_changes }}, changes_count=${{ steps.plan.outputs.changes_count }}, apply=${{ steps.apply.outcome }}, apply_no_changes=${{ steps.apply_no_changes.outcome }}, apply_effective=$APPLY_STATUS, healthcheck=${{ steps.healthcheck.outcome }}, agent=${{ steps.agent.outcome }}",
             "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "commit": "${{ github.sha }}",
             "actor": "${{ github.actor }}",
@@ -543,7 +569,6 @@ jobs:
           path: |
             artifacts/agent-output.json
             artifacts/cost-impact.json
-            artifacts/datadog-agent.json
             tfsec-results.json
             checkov-results.json
           retention-days: 5
@@ -556,8 +581,7 @@ jobs:
             -refresh-only \
             -auto-approve \
             -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
-            -var="datadog_api_key=${{ secrets.DD_API_KEY }}" \
-            -var="datadog_app_key=${{ secrets.DD_APP_KEY }}" || true
+            -var="app_image_tag=${{ steps.build_app.outputs.image_tag }}" || true
 
 # ──────────────────────────────────────────────
 # Stage 3: Staging — integration tests, autoscaler, DNS, ingress
@@ -625,13 +649,47 @@ jobs:
       - name: Terraform Init (staging)
         run: terraform -chdir=terraform/environments/staging init
 
+      - name: Bootstrap ECR & Build App Image
+        id: build_app
+        run: |
+          set -euo pipefail
+
+          ENVIRONMENT="staging"
+          PROJECT=$(awk -F'=' '/^project/{gsub(/[ "\t]/, "", $2); print $2}' terraform/environments/${ENVIRONMENT}/terraform.tfvars)
+          ECR_REPO="${PROJECT}-${ENVIRONMENT}-app"
+          IMAGE_TAG="${{ github.sha }}"
+          SHORT_TAG="${IMAGE_TAG:0:8}"
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          ECR_URL="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
+
+          if ! aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$AWS_REGION" 2>/dev/null; then
+            echo "ECR repository not found. Creating via Terraform target..."
+            terraform -chdir=terraform/environments/${ENVIRONMENT} apply \
+              -target=module.ecr \
+              -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
+              -auto-approve
+          fi
+
+          aws ecr get-login-password --region "$AWS_REGION" | \
+            docker login --username AWS --password-stdin "$ECR_URL"
+
+          docker build \
+            --build-arg APP_VERSION="${SHORT_TAG}" \
+            -t "${ECR_URL}:${SHORT_TAG}" \
+            -t "${ECR_URL}:latest" \
+            app/
+          docker push "${ECR_URL}:${SHORT_TAG}"
+          docker push "${ECR_URL}:latest"
+
+          echo "image_tag=${SHORT_TAG}" >> "$GITHUB_OUTPUT"
+          echo "ecr_url=${ECR_URL}" >> "$GITHUB_OUTPUT"
+
       - name: Terraform Plan (staging)
         id: plan
         run: |
           terraform -chdir=terraform/environments/staging plan \
             -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
-            -var="datadog_api_key=${{ secrets.DD_API_KEY }}" \
-            -var="datadog_app_key=${{ secrets.DD_APP_KEY }}" \
+            -var="app_image_tag=${{ steps.build_app.outputs.image_tag }}" \
             -out=tfplan.binary \
             -detailed-exitcode 2>&1 | tee plan_output.txt
 
@@ -729,21 +787,6 @@ jobs:
           scripts/k8s-healthcheck.sh ${{ steps.cluster.outputs.name }} ${{ env.AWS_REGION }} 2>&1 | tee healthcheck_output.txt
         continue-on-error: false
 
-      - name: Datadog Configuration Agent
-        id: datadog_agent
-        if: steps.kube_api.outputs.reachable == 'true'
-        run: |
-          chmod +x scripts/datadog-agent.sh
-          scripts/datadog-agent.sh \
-            "${{ steps.cluster.outputs.name }}" \
-            "${{ env.AWS_REGION }}" \
-            "staging" 2>&1 | tee datadog_agent_output.txt
-        continue-on-error: true
-        env:
-          DD_API_KEY: ${{ secrets.DD_API_KEY }}
-          DD_APP_KEY: ${{ secrets.DD_APP_KEY }}
-          DD_SITE: ${{ env.DD_SITE }}
-
       - name: Validate Cluster Autoscaler
         id: autoscaler
         if: steps.kube_api.outputs.reachable == 'true'
@@ -796,6 +839,23 @@ jobs:
         run: |
           kubectl wait --for=condition=available deployment/metrics-server -n kube-system --timeout=120s
           kubectl top nodes || (echo "metrics-server not ready yet, giving 30s..."; sleep 30; kubectl top nodes)
+
+      - name: Validate App Deployment
+        id: app_validation
+        if: steps.kube_api.outputs.reachable == 'true'
+        run: |
+          echo "Checking TypeScript app deployment..."
+          kubectl wait --for=condition=available \
+            deployment/typescript-app \
+            -n app \
+            --timeout=120s
+
+          APP_PODS=$(kubectl get pods -n app -l app=typescript-app --field-selector=status.phase=Running -o name | wc -l)
+          echo "TypeScript app running: $APP_PODS pod(s)"
+          if [[ "$APP_PODS" -lt "1" ]]; then
+            echo "FATAL: No running app pods found"
+            exit 1
+          fi
 
       - name: Validate Cluster via AWS API (private endpoint fallback)
         id: private_validation
@@ -945,6 +1005,7 @@ jobs:
               "${{ steps.dns.outcome }}" \
               "${{ steps.ingress.outcome }}" \
               "${{ steps.metrics.outcome }}" \
+              "${{ steps.app_validation.outcome }}" \
               "${{ steps.changelog.outcome }}" \
               "${{ steps.agent.outcome }}"; do
               if [[ "$outcome" != "success" ]]; then
@@ -971,7 +1032,7 @@ jobs:
           {
             "stage": "staging",
             "status": "$STATUS",
-            "reason": "apply=${{ steps.apply.outcome }}, cost_agent=${{ steps.cost_agent.outcome }}, kube_api_reachable=${{ steps.kube_api.outputs.reachable }}, healthcheck=${{ steps.healthcheck.outcome }}, datadog_agent=${{ steps.datadog_agent.outcome }}, autoscaler=${{ steps.autoscaler.outcome }}, dns=${{ steps.dns.outcome }}, ingress=${{ steps.ingress.outcome }}, metrics=${{ steps.metrics.outcome }}, changelog=${{ steps.changelog.outcome }}, private_validation=${{ steps.private_validation.outcome }}, agent=${{ steps.agent.outcome }}",
+            "reason": "apply=${{ steps.apply.outcome }}, cost_agent=${{ steps.cost_agent.outcome }}, kube_api_reachable=${{ steps.kube_api.outputs.reachable }}, healthcheck=${{ steps.healthcheck.outcome }}, autoscaler=${{ steps.autoscaler.outcome }}, dns=${{ steps.dns.outcome }}, ingress=${{ steps.ingress.outcome }}, metrics=${{ steps.metrics.outcome }}, app_validation=${{ steps.app_validation.outcome }}, changelog=${{ steps.changelog.outcome }}, private_validation=${{ steps.private_validation.outcome }}, agent=${{ steps.agent.outcome }}",
             "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "commit": "${{ github.sha }}",
             "actor": "${{ github.actor }}",
@@ -990,7 +1051,6 @@ jobs:
           path: |
             artifacts/agent-output.json
             artifacts/cost-impact.json
-            artifacts/datadog-agent.json
             artifacts/CHANGELOG.md
             artifacts/changelog.json
           retention-days: 7
@@ -1003,9 +1063,9 @@ jobs:
             -refresh-only \
             -auto-approve \
             -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
-            -var="datadog_api_key=${{ secrets.DD_API_KEY }}" \
-            -var="datadog_app_key=${{ secrets.DD_APP_KEY }}" || true
+            -var="app_image_tag=${{ steps.build_app.outputs.image_tag }}" || true
           kubectl rollout undo deployment --all -n kube-system || true
+          kubectl rollout undo deployment/typescript-app -n app || true
 
 # ──────────────────────────────────────────────
 # Stage 4: Production — manual approval gate + final validation
@@ -1088,13 +1148,47 @@ jobs:
       - name: Terraform Init (prod)
         run: terraform -chdir=terraform/environments/prod init
 
+      - name: Bootstrap ECR & Build App Image
+        id: build_app
+        run: |
+          set -euo pipefail
+
+          ENVIRONMENT="prod"
+          PROJECT=$(awk -F'=' '/^project/{gsub(/[ "\t]/, "", $2); print $2}' terraform/environments/${ENVIRONMENT}/terraform.tfvars)
+          ECR_REPO="${PROJECT}-${ENVIRONMENT}-app"
+          IMAGE_TAG="${{ github.sha }}"
+          SHORT_TAG="${IMAGE_TAG:0:8}"
+          AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          ECR_URL="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
+
+          if ! aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$AWS_REGION" 2>/dev/null; then
+            echo "ECR repository not found. Creating via Terraform target..."
+            terraform -chdir=terraform/environments/${ENVIRONMENT} apply \
+              -target=module.ecr \
+              -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
+              -auto-approve
+          fi
+
+          aws ecr get-login-password --region "$AWS_REGION" | \
+            docker login --username AWS --password-stdin "$ECR_URL"
+
+          docker build \
+            --build-arg APP_VERSION="${SHORT_TAG}" \
+            -t "${ECR_URL}:${SHORT_TAG}" \
+            -t "${ECR_URL}:latest" \
+            app/
+          docker push "${ECR_URL}:${SHORT_TAG}"
+          docker push "${ECR_URL}:latest"
+
+          echo "image_tag=${SHORT_TAG}" >> "$GITHUB_OUTPUT"
+          echo "ecr_url=${ECR_URL}" >> "$GITHUB_OUTPUT"
+
       - name: Terraform Plan (prod)
         id: plan
         run: |
           terraform -chdir=terraform/environments/prod plan \
             -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
-            -var="datadog_api_key=${{ secrets.DD_API_KEY }}" \
-            -var="datadog_app_key=${{ secrets.DD_APP_KEY }}" \
+            -var="app_image_tag=${{ steps.build_app.outputs.image_tag }}" \
             -out=tfplan.binary \
             -detailed-exitcode 2>&1 | tee plan_output.txt
 
@@ -1213,27 +1307,12 @@ jobs:
           scripts/k8s-healthcheck.sh ${{ steps.cluster.outputs.name }} ${{ env.AWS_REGION }} 2>&1 | tee healthcheck_output.txt
         continue-on-error: false
 
-      - name: Datadog Configuration Agent
-        id: datadog_agent
-        if: steps.guard.outputs.cluster_exists == 'true'
-        run: |
-          chmod +x scripts/datadog-agent.sh
-          scripts/datadog-agent.sh \
-            "${{ steps.cluster.outputs.name }}" \
-            "${{ env.AWS_REGION }}" \
-            "prod" 2>&1 | tee datadog_agent_output.txt
-        continue-on-error: true
-        env:
-          DD_API_KEY: ${{ secrets.DD_API_KEY }}
-          DD_APP_KEY: ${{ secrets.DD_APP_KEY }}
-          DD_SITE: ${{ env.DD_SITE }}
-
       - name: Verify Rollout Status
         id: rollout
         if: steps.guard.outputs.cluster_exists == 'true' && steps.kube_api.outputs.reachable == 'true'
         run: |
           echo "Verifying all deployments are rolled out..."
-          for ns in kube-system; do
+          for ns in kube-system app; do
             kubectl get deployments -n "$ns" -o name | while read -r deploy; do
               echo "Checking $deploy in $ns..."
               kubectl rollout status "$deploy" -n "$ns" --timeout=120s
@@ -1284,7 +1363,7 @@ jobs:
           {
             "stage": "production",
             "status": "$STATUS",
-            "reason": "security=${{ steps.security.outcome }}, prod_recommendation=${{ steps.prod_recommendation.outcome }}, auto_approval=${{ steps.auto_approval.outcome }}, apply=${{ steps.apply.outcome }}, healthcheck=${{ steps.healthcheck.outcome }}, datadog_agent=${{ steps.datadog_agent.outcome }}, rollout=${{ steps.rollout.outcome }}, agent=${{ steps.agent.outcome }}",
+            "reason": "security=${{ steps.security.outcome }}, prod_recommendation=${{ steps.prod_recommendation.outcome }}, auto_approval=${{ steps.auto_approval.outcome }}, apply=${{ steps.apply.outcome }}, healthcheck=${{ steps.healthcheck.outcome }}, rollout=${{ steps.rollout.outcome }}, agent=${{ steps.agent.outcome }}",
             "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "commit": "${{ github.sha }}",
             "actor": "${{ github.actor }}",
@@ -1305,7 +1384,6 @@ jobs:
             artifacts/prod-recommendation.json
             artifacts/auto-approval-decision.json
             artifacts/auto-approval-engine.log
-            artifacts/datadog-agent.json
           retention-days: 30
 
       - name: Rollback on Failure
@@ -1316,9 +1394,9 @@ jobs:
             -refresh-only \
             -auto-approve \
             -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
-            -var="datadog_api_key=${{ secrets.DD_API_KEY }}" \
-            -var="datadog_app_key=${{ secrets.DD_APP_KEY }}" || true
+            -var="app_image_tag=${{ steps.build_app.outputs.image_tag }}" || true
           kubectl rollout undo deployment --all -n kube-system || true
+          kubectl rollout undo deployment/typescript-app -n app || true
           echo "Rollback complete. Manual review required."
 
   # Pipeline summary job

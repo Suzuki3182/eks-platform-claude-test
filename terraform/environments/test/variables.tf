@@ -21,22 +21,9 @@ variable "project" {
   default     = "eks-platform"
 }
 
-variable "datadog_api_key" {
-  description = "Datadog API key (passed via CI/CD secret DD_API_KEY)"
+variable "app_image_tag" {
+  description = "Docker image tag for the TypeScript application"
   type        = string
-  sensitive   = true
-}
-
-variable "datadog_app_key" {
-  description = "Datadog application key (passed via CI/CD secret DD_APP_KEY)"
-  type        = string
-  sensitive   = true
-  default     = ""
-}
-
-variable "datadog_site" {
-  description = "Datadog intake site"
-  type        = string
-  default     = "datadoghq.com"
+  default     = "latest"
 }
 

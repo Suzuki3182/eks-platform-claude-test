@@ -59,3 +59,18 @@ output "kubeconfig_command" {
   description = "Command to update kubeconfig"
   value       = "aws eks update-kubeconfig --region ${var.aws_region} --name ${module.eks.cluster_name}"
 }
+
+output "ecr_repository_url" {
+  description = "ECR repository URL for the TypeScript app"
+  value       = module.ecr.repository_url
+}
+
+output "app_namespace" {
+  description = "Kubernetes namespace for the TypeScript app"
+  value       = module.app.namespace
+}
+
+output "app_ingress_hostname" {
+  description = "ALB hostname for the TypeScript app"
+  value       = module.app.ingress_hostname
+}
