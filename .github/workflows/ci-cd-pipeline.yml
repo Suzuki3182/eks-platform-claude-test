@@ -21,7 +21,7 @@ on:
 
 permissions:
   id-token: write
-  contents: read
+  contents: write
   pull-requests: write
 
 env:
@@ -38,7 +38,7 @@ jobs:
   build:
     name: Build & Validate
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     outputs:
       status: ${{ steps.emit.outputs.status }}
       plan_artifact: ${{ steps.emit.outputs.plan_artifact }}
@@ -46,6 +46,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_TOKEN || github.token }}
+          fetch-depth: 10
 
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
@@ -57,12 +60,28 @@ jobs:
         with:
           tflint_version: ${{ env.TFLINT_VERSION }}
 
+      - name: Terraform Format — Auto-Fix
+        id: fmt_fix
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          terraform fmt -recursive terraform/
+          if ! git diff --quiet terraform/; then
+            git config user.email "pipeline-autofix@eks-platform.local"
+            git config user.name "Pipeline Auto-Fix"
+            git add terraform/
+            git commit -m "fix(auto-repair): terraform fmt auto-correction [skip-repair]"
+            git push origin HEAD
+            echo "auto_fixed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "auto_fixed=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Terraform Format Check
         id: fmt
         run: |
           terraform fmt -check -recursive terraform/
           echo "fmt_result=passed" >> "$GITHUB_OUTPUT"
-        continue-on-error: false
+        continue-on-error: true
 
       - name: Terraform Init (modules)
         run: |
@@ -91,9 +110,11 @@ jobs:
           echo "tflint_result=passed" >> "$GITHUB_OUTPUT"
 
       - name: Shellcheck Scripts
+        id: shellcheck
         run: |
           sudo apt-get install -y shellcheck
           shellcheck scripts/*.sh
+        continue-on-error: true
 
       - name: TypeScript App Build Check
         id: app_build
@@ -102,17 +123,26 @@ jobs:
           npm ci
           npm run build
           echo "app_build_result=passed" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
 
       - name: Emit Build Status
         id: emit
         if: always()
         run: |
           STATUS="success"
-          if [[ "${{ steps.fmt.outcome }}" != "success" ]] || \
-             [[ "${{ steps.validate.outcome }}" != "success" ]] || \
-             [[ "${{ steps.tflint.outcome }}" != "success" ]] || \
-             [[ "${{ steps.app_build.outcome }}" != "success" ]]; then
-            STATUS="failure"
+          FAILED_STEP=""
+          FAILURE_TYPE=""
+
+          if [[ "${{ steps.fmt.outcome }}" != "success" ]]; then
+            STATUS="failure"; FAILED_STEP="Terraform Format Check"; FAILURE_TYPE="TF_FORMAT"
+          elif [[ "${{ steps.validate.outcome }}" != "success" ]]; then
+            STATUS="failure"; FAILED_STEP="Terraform Validate"; FAILURE_TYPE="TF_VALIDATE"
+          elif [[ "${{ steps.tflint.outcome }}" != "success" ]]; then
+            STATUS="failure"; FAILED_STEP="TFLint"; FAILURE_TYPE="TF_LINT"
+          elif [[ "${{ steps.shellcheck.outcome }}" != "success" ]]; then
+            STATUS="failure"; FAILED_STEP="Shellcheck Scripts"; FAILURE_TYPE="SHELLCHECK"
+          elif [[ "${{ steps.app_build.outcome }}" != "success" ]]; then
+            STATUS="failure"; FAILED_STEP="TypeScript App Build Check"; FAILURE_TYPE="NPM_BUILD"
           fi
 
           mkdir -p artifacts
@@ -120,7 +150,7 @@ jobs:
           {
             "stage": "build",
             "status": "$STATUS",
-            "reason": "fmt=${{ steps.fmt.outcome }}, validate=${{ steps.validate.outcome }}, tflint=${{ steps.tflint.outcome }}, app_build=${{ steps.app_build.outcome }}",
+            "reason": "fmt=${{ steps.fmt.outcome }}, validate=${{ steps.validate.outcome }}, tflint=${{ steps.tflint.outcome }}, shellcheck=${{ steps.shellcheck.outcome }}, app_build=${{ steps.app_build.outcome }}",
             "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "commit": "${{ github.sha }}",
             "actor": "${{ github.actor }}"
@@ -129,15 +159,42 @@ jobs:
 
           echo "status=$STATUS" >> "$GITHUB_OUTPUT"
           echo "plan_artifact=build-status" >> "$GITHUB_OUTPUT"
+          echo "failed_step=$FAILED_STEP" >> "$GITHUB_OUTPUT"
+          echo "failure_type=$FAILURE_TYPE" >> "$GITHUB_OUTPUT"
           cat artifacts/agent-output.json
+
+          # Emit structured failure context for the repair agent
+          if [[ "$STATUS" == "failure" ]]; then
+            cat > artifacts/failure-context.json << EOF
+          {
+            "stage": "build",
+            "failed_step": "$FAILED_STEP",
+            "failure_type": "$FAILURE_TYPE",
+            "commit_sha": "${{ github.sha }}",
+            "run_id": "${{ github.run_id }}",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "error_output": ""
+          }
+          EOF
+          fi
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: build-status
-          path: artifacts/agent-output.json
+          path: |
+            artifacts/agent-output.json
+            artifacts/failure-context.json
           retention-days: 5
+
+      - name: Upload Failure Context (for repair agent)
+        uses: actions/upload-artifact@v4
+        if: failure() || steps.emit.outputs.status == 'failure'
+        with:
+          name: failure-context
+          path: artifacts/failure-context.json
+          retention-days: 3
 
 # ──────────────────────────────────────────────
 # Stage 2: Test — ephemeral test environment deploy + security scans
@@ -436,10 +493,36 @@ jobs:
         id: apply
         if: steps.plan.outputs.has_changes == 'true' && steps.precheck_cluster.outputs.exists != 'true'
         run: |
-          terraform -chdir=terraform/environments/test apply \
-            -auto-approve \
-            "${{ steps.plan.outputs.plan_file }}" 2>&1 | tee apply_output.txt
-          apply_exit=${PIPESTATUS[0]}
+          retry_apply() {
+            local attempt=1
+            local max_attempts=3
+            while [[ $attempt -le $max_attempts ]]; do
+              echo "Apply attempt $attempt/$max_attempts..."
+              terraform -chdir=terraform/environments/test apply \
+                -auto-approve \
+                "${{ steps.plan.outputs.plan_file }}" 2>&1 | tee apply_output.txt
+              apply_exit=${PIPESTATUS[0]}
+              if [[ $apply_exit -eq 0 ]]; then return 0; fi
+
+              # Retry only on transient errors
+              if grep -qE "Error acquiring the state lock|RequestExpired|Throttling|rate exceeded|timeout" apply_output.txt; then
+                echo "Transient error detected. Waiting $((attempt * 30))s before retry..."
+                # Force-unlock if it's a stale lock
+                LOCK_ID=$(awk '/^│   ID:/{print $3; exit}' apply_output.txt | tr -d '\r')
+                if [[ -n "$LOCK_ID" ]]; then
+                  terraform -chdir=terraform/environments/test force-unlock -force "$LOCK_ID" || true
+                fi
+                sleep $((attempt * 30))
+                ((attempt++))
+              else
+                echo "Non-transient error — not retrying."
+                return $apply_exit
+              fi
+            done
+            return $apply_exit
+          }
+          retry_apply
+          apply_exit=$?
           echo "apply_exit_code=$apply_exit" >> "$GITHUB_OUTPUT"
           exit $apply_exit
 
@@ -559,6 +642,31 @@ jobs:
           echo "status=$STATUS" >> "$GITHUB_OUTPUT"
           cat artifacts/agent-output.json
 
+      - name: Emit Failure Context (test)
+        if: failure() || steps.emit.outputs.status == 'failure'
+        run: |
+          FAILED_STEP="unknown"
+          FAILURE_TYPE="UNKNOWN"
+          if [[ "${{ steps.security_triage.outcome }}" != "success" ]]; then
+            FAILED_STEP="Security Triage Agent"; FAILURE_TYPE="SECURITY_BLOCK"
+          elif [[ "${{ steps.apply.outcome }}" == "failure" ]]; then
+            FAILED_STEP="Terraform Apply (test)"; FAILURE_TYPE="TF_APPLY"
+          elif [[ "${{ steps.healthcheck.outcome }}" == "failure" ]]; then
+            FAILED_STEP="Run K8s Health Check"; FAILURE_TYPE="K8S_HEALTH"
+          fi
+          mkdir -p artifacts
+          cat > artifacts/failure-context.json << EOF
+          {
+            "stage": "test",
+            "failed_step": "$FAILED_STEP",
+            "failure_type": "$FAILURE_TYPE",
+            "commit_sha": "${{ github.sha }}",
+            "run_id": "${{ github.run_id }}",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "error_output": ""
+          }
+          EOF
+
       - name: Upload Test Artifacts
         uses: actions/upload-artifact@v4
         if: always()
@@ -571,6 +679,14 @@ jobs:
             tfsec-results.json
             checkov-results.json
           retention-days: 5
+
+      - name: Upload Failure Context (test, for repair agent)
+        uses: actions/upload-artifact@v4
+        if: failure() || steps.emit.outputs.status == 'failure'
+        with:
+          name: failure-context
+          path: artifacts/failure-context.json
+          retention-days: 3
 
       - name: Rollback on Failure
         if: failure() && steps.apply.outcome == 'success'
@@ -702,9 +818,29 @@ jobs:
       - name: Terraform Apply (staging)
         id: apply
         run: |
-          terraform -chdir=terraform/environments/staging apply \
-            -auto-approve \
-            tfplan.binary 2>&1 | tee apply_output.txt
+          retry_apply() {
+            local attempt=1
+            local max_attempts=3
+            while [[ $attempt -le $max_attempts ]]; do
+              echo "Apply attempt $attempt/$max_attempts..."
+              terraform -chdir=terraform/environments/staging apply \
+                -auto-approve tfplan.binary 2>&1 | tee apply_output.txt
+              apply_exit=${PIPESTATUS[0]}
+              if [[ $apply_exit -eq 0 ]]; then return 0; fi
+              if grep -qE "Error acquiring the state lock|RequestExpired|Throttling|rate exceeded|timeout" apply_output.txt; then
+                LOCK_ID=$(awk '/^│   ID:/{print $3; exit}' apply_output.txt | tr -d '\r')
+                if [[ -n "$LOCK_ID" ]]; then
+                  terraform -chdir=terraform/environments/staging force-unlock -force "$LOCK_ID" || true
+                fi
+                sleep $((attempt * 30))
+                ((attempt++))
+              else
+                return $apply_exit
+              fi
+            done
+            return $apply_exit
+          }
+          retry_apply
 
       - name: Resolve cluster name from Terraform output
         id: cluster
@@ -1230,9 +1366,29 @@ jobs:
         id: apply
         if: steps.auto_approval.outcome == 'success'
         run: |
-          terraform -chdir=terraform/environments/prod apply \
-            -auto-approve \
-            tfplan.binary 2>&1 | tee apply_output.txt
+          retry_apply() {
+            local attempt=1
+            local max_attempts=3
+            while [[ $attempt -le $max_attempts ]]; do
+              echo "Apply attempt $attempt/$max_attempts..."
+              terraform -chdir=terraform/environments/prod apply \
+                -auto-approve tfplan.binary 2>&1 | tee apply_output.txt
+              apply_exit=${PIPESTATUS[0]}
+              if [[ $apply_exit -eq 0 ]]; then return 0; fi
+              if grep -qE "Error acquiring the state lock|RequestExpired|Throttling|rate exceeded|timeout" apply_output.txt; then
+                LOCK_ID=$(awk '/^│   ID:/{print $3; exit}' apply_output.txt | tr -d '\r')
+                if [[ -n "$LOCK_ID" ]]; then
+                  terraform -chdir=terraform/environments/prod force-unlock -force "$LOCK_ID" || true
+                fi
+                sleep $((attempt * 30))
+                ((attempt++))
+              else
+                return $apply_exit
+              fi
+            done
+            return $apply_exit
+          }
+          retry_apply
 
       - name: Resolve cluster name from Terraform output
         id: cluster

@@ -128,9 +128,23 @@ if [[ "$COMMIT_MSG" =~ [Ss]ecurity|CVE|[Ss]ec-fix|tfsec|checkov ]]; then
   log_decision "INFO" "Change type: SECURITY_FIX (elevated risk, high priority)"
 fi
 
-if git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -q '^terraform/'; then
-  IS_INFRASTRUCTURE_CHANGE=true
-  log_decision "INFO" "Change type: INFRASTRUCTURE_CHANGE (high risk) — terraform/ files modified"
+# Only block for changes to CRITICAL infrastructure modules.
+# App-level modules (ecr, app, addons) and tfvars are auto-approvable.
+CRITICAL_TF_MODULES="${CRITICAL_TF_MODULES:-vpc eks iam github_oidc}"
+CHANGED_TF=$(git diff --name-only HEAD~1 HEAD 2>/dev/null | grep '^terraform/' || true)
+if [[ -n "$CHANGED_TF" ]]; then
+  while IFS= read -r changed_file; do
+    for mod in $CRITICAL_TF_MODULES; do
+      if [[ "$changed_file" == "terraform/modules/${mod}/"* ]]; then
+        IS_INFRASTRUCTURE_CHANGE=true
+        log_decision "INFO" "Change type: CRITICAL_INFRASTRUCTURE_CHANGE — $changed_file"
+        break 2
+      fi
+    done
+  done <<< "$CHANGED_TF"
+  if [[ "$IS_INFRASTRUCTURE_CHANGE" == "false" ]]; then
+    log_decision "INFO" "Terraform changes are in non-critical modules (ecr/app/addons/tfvars) — auto-approvable"
+  fi
 fi
 
 # Check cost impact

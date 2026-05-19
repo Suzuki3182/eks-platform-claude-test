@@ -1,0 +1,191 @@
+name: Pipeline Auto-Repair
+
+on:
+  workflow_run:
+    workflows: ["EKS Platform CI/CD Pipeline"]
+    types: [completed]
+
+permissions:
+  id-token: write
+  contents: write
+  actions: read
+
+jobs:
+  repair:
+    name: Analyze & Auto-Repair
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Only trigger on actual failures, not cancellations or successes
+    if: >
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.head_branch == 'main'
+
+    steps:
+      - name: Check loop guard (skip if triggering commit is itself an auto-repair)
+        id: loop_check
+        run: |
+          COMMIT_MSG="${{ github.event.workflow_run.head_commit.message }}"
+          if echo "$COMMIT_MSG" | grep -q 'fix(auto-repair):'; then
+            echo "triggered_by_repair=true" >> "$GITHUB_OUTPUT"
+            echo "Triggering commit is itself an auto-repair commit."
+            echo "Loop guard check will be done by the repair agent."
+          else
+            echo "triggered_by_repair=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_TOKEN || github.token }}
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 10
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.6.6'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Download failure context artifact from failed run
+        id: download_context
+        run: |
+          mkdir -p artifacts
+
+          RUN_ID="${{ github.event.workflow_run.id }}"
+          echo "Fetching artifacts from failed run: $RUN_ID"
+
+          ARTIFACT_ID=$(gh api \
+            "repos/${{ github.repository }}/actions/runs/${RUN_ID}/artifacts" \
+            --jq '.artifacts[] | select(.name=="failure-context") | .id' \
+            2>/dev/null | head -1 || echo "")
+
+          if [[ -n "$ARTIFACT_ID" ]]; then
+            gh api "repos/${{ github.repository }}/actions/artifacts/${ARTIFACT_ID}/zip" \
+              > /tmp/failure-context.zip 2>/dev/null || true
+            if [[ -f /tmp/failure-context.zip ]]; then
+              unzip -o /tmp/failure-context.zip -d artifacts/ 2>/dev/null || true
+              echo "found=true" >> "$GITHUB_OUTPUT"
+              echo "Failure context downloaded:"
+              cat artifacts/failure-context.json 2>/dev/null || true
+            fi
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No failure-context artifact found in run $RUN_ID"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+
+      - name: Build failure context from run logs (if artifact missing)
+        if: steps.download_context.outputs.found != 'true'
+        run: |
+          mkdir -p artifacts
+          RUN_ID="${{ github.event.workflow_run.id }}"
+
+          # Get the failed jobs
+          FAILED_JOB=$(gh api \
+            "repos/${{ github.repository }}/actions/runs/${RUN_ID}/jobs" \
+            --jq '.jobs[] | select(.conclusion=="failure") | {name: .name, steps: [.steps[] | select(.conclusion=="failure") | .name]} | @json' \
+            2>/dev/null | head -1 || echo "")
+
+          FAILED_STEP=$(echo "$FAILED_JOB" | jq -r '.steps[0] // "unknown"' 2>/dev/null || echo "unknown")
+          STAGE=$(echo "$FAILED_JOB" | jq -r '.name // "unknown"' 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr ' ' '_')
+
+          # Infer failure type from step name
+          FAILURE_TYPE="UNKNOWN"
+          case "$FAILED_STEP" in
+            *"Format"*|*"fmt"*)           FAILURE_TYPE="TF_FORMAT" ;;
+            *"Validate"*|*"validate"*)    FAILURE_TYPE="TF_VALIDATE" ;;
+            *"Shellcheck"*|*"shellcheck"*) FAILURE_TYPE="SHELLCHECK" ;;
+            *"TFLint"*|*"tflint"*)        FAILURE_TYPE="TF_LINT" ;;
+            *"TypeScript"*|*"npm"*|*"build"*) FAILURE_TYPE="NPM_BUILD" ;;
+            *"Security Triage"*)          FAILURE_TYPE="SECURITY_BLOCK" ;;
+            *"tfsec"*)                    FAILURE_TYPE="SECURITY_BLOCK" ;;
+          esac
+
+          cat > artifacts/failure-context.json << EOF
+          {
+            "stage": "$STAGE",
+            "failed_step": "$FAILED_STEP",
+            "failure_type": "$FAILURE_TYPE",
+            "commit_sha": "${{ github.event.workflow_run.head_sha }}",
+            "run_id": "$RUN_ID",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "error_output": ""
+          }
+          EOF
+          echo "Built failure context from run metadata:"
+          cat artifacts/failure-context.json
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+
+      - name: Configure git
+        run: |
+          git config user.email "pipeline-repair@eks-platform.local"
+          git config user.name "Pipeline Repair Agent"
+          git remote set-url origin "https://x-access-token:${{ secrets.GH_TOKEN || github.token }}@github.com/${{ github.repository }}.git"
+
+      - name: Initialize Terraform (for validate/fmt fixes)
+        run: |
+          for env_dir in terraform/environments/*/; do
+            terraform -chdir="$env_dir" init -backend=false 2>/dev/null || true
+          done
+        continue-on-error: true
+
+      - name: Install app dependencies (for npm/ts fixes)
+        run: |
+          if [[ -f app/package.json ]]; then
+            cd app && npm ci --silent 2>/dev/null || npm install --silent 2>/dev/null || true
+          fi
+        continue-on-error: true
+
+      - name: Run Pipeline Repair Agent
+        id: repair
+        run: |
+          chmod +x scripts/pipeline-repair-agent.sh
+          scripts/pipeline-repair-agent.sh artifacts/failure-context.json 2>&1 | tee repair_output.txt
+          echo "repair_exit=$?" >> "$GITHUB_OUTPUT"
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GIT_USER_EMAIL: "pipeline-repair@eks-platform.local"
+          GIT_USER_NAME: "Pipeline Repair Agent"
+          MAX_CONSECUTIVE_REPAIRS: '3'
+        continue-on-error: true
+
+      - name: Upload Repair Report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: repair-report-${{ github.event.workflow_run.id }}
+          path: |
+            artifacts/repair-report.json
+            artifacts/pipeline-repair-agent.log
+            repair_output.txt
+          retention-days: 7
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Pipeline Auto-Repair Report" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Triggered by failed run:** [${{ github.event.workflow_run.id }}](${{ github.event.workflow_run.html_url }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -f artifacts/repair-report.json ]]; then
+            OUTCOME=$(jq -r '.outcome // "unknown"' artifacts/repair-report.json)
+            FIX=$(jq -r '.fix_description // "n/a"' artifacts/repair-report.json)
+            echo "**Outcome:** $OUTCOME" >> "$GITHUB_STEP_SUMMARY"
+            echo "**Fix:** $FIX" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [[ -f artifacts/failure-context.json ]]; then
+            TYPE=$(jq -r '.failure_type // "unknown"' artifacts/failure-context.json)
+            STEP=$(jq -r '.failed_step // "unknown"' artifacts/failure-context.json)
+            echo "**Failure type:** $TYPE" >> "$GITHUB_STEP_SUMMARY"
+            echo "**Failed step:** $STEP" >> "$GITHUB_STEP_SUMMARY"
+          fi
