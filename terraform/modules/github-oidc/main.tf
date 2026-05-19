@@ -88,6 +88,24 @@ resource "aws_iam_role" "github_actions" {
 # Terraform state access (S3 + DynamoDB)
 # ──────────────────────────────────────────────
 data "aws_iam_policy_document" "terraform_state" {
+  # Allow bootstrap of the Terraform backend when buckets/tables are missing.
+  statement {
+    sid    = "TerraformStateBootstrap"
+    effect = "Allow"
+    actions = [
+      "s3:CreateBucket",
+      "s3:GetBucketLocation",
+      "s3:PutBucketVersioning",
+      "s3:PutBucketPublicAccessBlock",
+      "dynamodb:CreateTable",
+      "dynamodb:DescribeTable",
+    ]
+    resources = [
+      "arn:aws:s3:::eks-platform-tfstate-${var.environment}",
+      "arn:aws:dynamodb:${var.aws_region}:${var.aws_account_id}:table/eks-platform-tfstate-lock",
+    ]
+  }
+
   statement {
     sid    = "TerraformStateS3"
     effect = "Allow"
