@@ -1,0 +1,120 @@
+name: Destroy Environment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to destroy'
+        required: true
+        type: choice
+        options: [test, staging, prod]
+      confirm:
+        description: 'Type the environment name again to confirm (e.g. "test")'
+        required: true
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  TF_VERSION: '1.6.6'
+  AWS_REGION: 'us-east-1'
+  TF_IN_AUTOMATION: 'true'
+  TF_INPUT: 'false'
+
+jobs:
+  destroy:
+    name: Destroy ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: ${{ inputs.environment }}
+
+    steps:
+      - name: Confirm environment match
+        run: |
+          if [[ "${{ inputs.confirm }}" != "${{ inputs.environment }}" ]]; then
+            echo "FATAL: confirmation input '${{ inputs.confirm }}' does not match environment '${{ inputs.environment }}'"
+            exit 1
+          fi
+          echo "Confirmation matched. Proceeding with destroy of: ${{ inputs.environment }}"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials — test
+        if: inputs.environment == 'test'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TEST }}
+          role-session-name: Destroy-Test-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure AWS Credentials — staging
+        if: inputs.environment == 'staging'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_STAGING }}
+          role-session-name: Destroy-Staging-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure AWS Credentials — prod
+        if: inputs.environment == 'prod'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_PROD }}
+          role-session-name: Destroy-Prod-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Init
+        run: terraform -chdir=terraform/environments/${{ inputs.environment }} init
+
+      - name: Deregister ECR images before destroy
+        run: |
+          set -euo pipefail
+          PROJECT=$(awk -F'=' '/^project/{gsub(/[ "\t]/, "", $2); print $2}' \
+            terraform/environments/${{ inputs.environment }}/terraform.tfvars)
+          ECR_REPO="${PROJECT}-${{ inputs.environment }}-app"
+
+          if aws ecr describe-repositories --repository-names "$ECR_REPO" \
+            --region "${{ env.AWS_REGION }}" >/dev/null 2>&1; then
+            echo "Deleting all images in $ECR_REPO before destroy..."
+            IMAGE_IDS=$(aws ecr list-images \
+              --repository-name "$ECR_REPO" \
+              --region "${{ env.AWS_REGION }}" \
+              --query 'imageIds' \
+              --output json)
+            if [[ "$IMAGE_IDS" != "[]" ]]; then
+              aws ecr batch-delete-image \
+                --repository-name "$ECR_REPO" \
+                --region "${{ env.AWS_REGION }}" \
+                --image-ids "$IMAGE_IDS"
+              echo "Images deleted."
+            else
+              echo "No images to delete."
+            fi
+          else
+            echo "ECR repository $ECR_REPO not found — skipping."
+          fi
+
+      - name: Terraform Destroy
+        run: |
+          terraform -chdir=terraform/environments/${{ inputs.environment }} destroy \
+            -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
+            -var="app_image_tag=latest" \
+            -auto-approve \
+            2>&1 | tee destroy_output.txt
+          destroy_exit=${PIPESTATUS[0]}
+          exit $destroy_exit
+
+      - name: Upload Destroy Log
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: destroy-log-${{ inputs.environment }}
+          path: destroy_output.txt
+          retention-days: 30
