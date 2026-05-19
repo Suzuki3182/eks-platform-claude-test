@@ -400,13 +400,7 @@ jobs:
 
           HIGH_COUNT=$(jq '[.results[] | select(.severity == "HIGH" or .severity == "CRITICAL")] | length' tfsec-results.json 2>/dev/null || echo "0")
           echo "high_count=$HIGH_COUNT" >> "$GITHUB_OUTPUT"
-
-          if [[ "$HIGH_COUNT" -gt "0" ]]; then
-            echo "FATAL: tfsec found $HIGH_COUNT HIGH/CRITICAL findings"
-            jq '.results[] | select(.severity == "HIGH" or .severity == "CRITICAL")' tfsec-results.json
-            exit 1
-          fi
-        continue-on-error: false
+        continue-on-error: true
 
       - name: Checkov Security Scan
         id: checkov
@@ -420,10 +414,15 @@ jobs:
 
           FAILED=$(jq '.summary.failed' checkov-results.json 2>/dev/null || echo "0")
           echo "failed=$FAILED" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
 
-          if [[ "$FAILED" -gt "0" ]]; then
-            echo "WARNING: checkov found $FAILED policy violations"
-          fi
+      - name: Security Triage Agent
+        id: security_triage
+        run: |
+          chmod +x scripts/security-triage-agent.sh
+          scripts/security-triage-agent.sh tfsec-results.json checkov-results.json 2>&1 | tee security_triage_output.txt
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         continue-on-error: false
 
       - name: Cost Impact Analysis Agent
@@ -537,8 +536,7 @@ jobs:
             APPLY_STATUS="success"
           fi
 
-          if [[ "${{ steps.tfsec.outcome }}" != "success" ]] || \
-             [[ "${{ steps.checkov.outcome }}" != "success" ]] || \
+          if [[ "${{ steps.security_triage.outcome }}" != "success" ]] || \
              [[ "$APPLY_STATUS" != "success" ]] || \
              [[ "${{ steps.healthcheck.outcome }}" != "success" ]] || \
              [[ "${{ steps.agent.outcome }}" != "success" ]]; then
@@ -550,7 +548,7 @@ jobs:
           {
             "stage": "test",
             "status": "$STATUS",
-              "reason": "tfsec=${{ steps.tfsec.outcome }}, checkov=${{ steps.checkov.outcome }}, cost_agent=${{ steps.cost_agent.outcome }}, plan_exit_code=${{ steps.plan.outputs.exit_code }}, plan_has_changes=${{ steps.plan.outputs.has_changes }}, changes_count=${{ steps.plan.outputs.changes_count }}, apply=${{ steps.apply.outcome }}, apply_no_changes=${{ steps.apply_no_changes.outcome }}, apply_effective=$APPLY_STATUS, healthcheck=${{ steps.healthcheck.outcome }}, agent=${{ steps.agent.outcome }}",
+              "reason": "security_triage=${{ steps.security_triage.outcome }}, tfsec=${{ steps.tfsec.outcome }}, checkov=${{ steps.checkov.outcome }}, cost_agent=${{ steps.cost_agent.outcome }}, plan_exit_code=${{ steps.plan.outputs.exit_code }}, plan_has_changes=${{ steps.plan.outputs.has_changes }}, changes_count=${{ steps.plan.outputs.changes_count }}, apply=${{ steps.apply.outcome }}, apply_no_changes=${{ steps.apply_no_changes.outcome }}, apply_effective=$APPLY_STATUS, healthcheck=${{ steps.healthcheck.outcome }}, agent=${{ steps.agent.outcome }}",
             "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "commit": "${{ github.sha }}",
             "actor": "${{ github.actor }}",
@@ -569,6 +567,7 @@ jobs:
           path: |
             artifacts/agent-output.json
             artifacts/cost-impact.json
+            artifacts/security-triage-report.json
             tfsec-results.json
             checkov-results.json
           retention-days: 5
@@ -1384,18 +1383,25 @@ jobs:
             artifacts/prod-recommendation.json
             artifacts/auto-approval-decision.json
             artifacts/auto-approval-engine.log
+            artifacts/rollback-decision-report.json
           retention-days: 30
 
-      - name: Rollback on Failure
-        if: failure() && steps.apply.outcome == 'success'
+      - name: Post-Deploy Rollout Monitoring
+        id: rollback_agent
+        if: steps.apply.outcome == 'success' && steps.guard.outputs.cluster_exists == 'true' && steps.kube_api.outputs.reachable == 'true'
         run: |
-          echo "CRITICAL: Production apply failed. Initiating rollback..."
-          terraform -chdir=terraform/environments/prod apply \
-            -refresh-only \
-            -auto-approve \
-            -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
-            -var="app_image_tag=${{ steps.build_app.outputs.image_tag }}" || true
-          kubectl rollout undo deployment --all -n kube-system || true
+          chmod +x scripts/rollback-decision-agent.sh
+          scripts/rollback-decision-agent.sh prod "${{ steps.cluster.outputs.name }}" 2>&1 | tee rollback_decision_output.txt
+        env:
+          ROLLBACK_AUTO_ENABLED: ${{ vars.ROLLBACK_AUTO_ENABLED || 'true' }}
+          ROLLBACK_MONITOR_SECONDS: '600'
+          ROLLBACK_POLL_INTERVAL: '60'
+        continue-on-error: true
+
+      - name: Rollback on Failure (static fallback)
+        if: failure() && steps.apply.outcome == 'success' && steps.rollback_agent.outcome != 'success'
+        run: |
+          echo "CRITICAL: Production failure detected. Initiating static rollback..."
           kubectl rollout undo deployment/typescript-app -n app || true
           echo "Rollback complete. Manual review required."
 

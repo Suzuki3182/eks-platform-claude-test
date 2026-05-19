@@ -128,9 +128,9 @@ if [[ "$COMMIT_MSG" =~ [Ss]ecurity|CVE|[Ss]ec-fix|tfsec|checkov ]]; then
   log_decision "INFO" "Change type: SECURITY_FIX (elevated risk, high priority)"
 fi
 
-if [[ "$COMMIT_MSG" =~ [Tt]erraform|infrastructure|vpc|eks-|node|cluster ]]; then
+if git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -q '^terraform/'; then
   IS_INFRASTRUCTURE_CHANGE=true
-  log_decision "INFO" "Change type: INFRASTRUCTURE_CHANGE (high risk)"
+  log_decision "INFO" "Change type: INFRASTRUCTURE_CHANGE (high risk) — terraform/ files modified"
 fi
 
 # Check cost impact

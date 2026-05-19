@@ -1,0 +1,156 @@
+name: Cluster Monitor & Self-Heal
+
+on:
+  schedule:
+    # Every 15 minutes
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to monitor'
+        required: true
+        default: 'prod'
+        type: choice
+        options: [test, staging, prod]
+      dry_run:
+        description: 'Dry run (assess only, no healing actions)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: 'us-east-1'
+
+jobs:
+  # ──────────────────────────────────────────────
+  # Self-heal all environments in parallel
+  # ──────────────────────────────────────────────
+  self-heal:
+    name: Self-Heal — ${{ matrix.environment }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    strategy:
+      fail-fast: false
+      matrix:
+        environment:
+          - ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'prod' }}
+        # On schedule, run all environments in parallel
+        include:
+          - environment: prod
+          - environment: staging
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials — test
+        if: matrix.environment == 'test'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TEST }}
+          role-session-name: SelfHeal-Test-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure AWS Credentials — staging
+        if: matrix.environment == 'staging'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_STAGING }}
+          role-session-name: SelfHeal-Staging-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Configure AWS Credentials — prod
+        if: matrix.environment == 'prod'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_PROD }}
+          role-session-name: SelfHeal-Prod-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Resolve cluster name
+        id: cluster
+        run: |
+          PROJECT=$(awk -F'=' '/^project/{gsub(/[ "\t]/, "", $2); print $2}' \
+            terraform/environments/${{ matrix.environment }}/terraform.tfvars)
+          ENVIRONMENT=$(awk -F'=' '/^environment/{gsub(/[ "\t]/, "", $2); print $2}' \
+            terraform/environments/${{ matrix.environment }}/terraform.tfvars)
+          echo "name=${PROJECT}-${ENVIRONMENT}" >> "$GITHUB_OUTPUT"
+
+      - name: Check cluster exists
+        id: cluster_check
+        run: |
+          if aws eks describe-cluster \
+            --region "${{ env.AWS_REGION }}" \
+            --name "${{ steps.cluster.outputs.name }}" \
+            >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "Cluster ${{ steps.cluster.outputs.name }} not found. Skipping self-heal."
+          fi
+
+      - name: Update kubeconfig
+        if: steps.cluster_check.outputs.exists == 'true'
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ steps.cluster.outputs.name }}
+
+      - name: Run Self-Heal Agent
+        id: selfheal
+        if: steps.cluster_check.outputs.exists == 'true'
+        run: |
+          chmod +x scripts/cluster-selfheal-agent.sh
+          scripts/cluster-selfheal-agent.sh \
+            "${{ steps.cluster.outputs.name }}" \
+            "${{ env.AWS_REGION }}"
+        env:
+          SELFHEAL_DRY_RUN: ${{ inputs.dry_run || 'false' }}
+
+      - name: Upload Self-Heal Report
+        uses: actions/upload-artifact@v4
+        if: always() && steps.cluster_check.outputs.exists == 'true'
+        with:
+          name: selfheal-report-${{ matrix.environment }}
+          path: |
+            artifacts/selfheal-report.json
+            artifacts/selfheal-agent.log
+          retention-days: 7
+
+      - name: Summary
+        if: always() && steps.cluster_check.outputs.exists == 'true'
+        run: |
+          echo "## Self-Heal Report — ${{ matrix.environment }}" >> "$GITHUB_STEP_SUMMARY"
+          if [[ -f artifacts/selfheal-report.json ]]; then
+            ACTIONS=$(jq '.actions_taken // 0' artifacts/selfheal-report.json)
+            CORDONED=$(jq '.nodes_cordoned // 0' artifacts/selfheal-report.json)
+            RESTARTED=$(jq '.pods_restarted // 0' artifacts/selfheal-report.json)
+            ADDONS=$(jq '.addons_recovered // 0' artifacts/selfheal-report.json)
+            echo "| Metric | Value |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|--------|-------|" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Actions taken | $ACTIONS |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Nodes cordoned | $CORDONED |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Pods restarted | $RESTARTED |" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Add-ons recovered | $ADDONS |" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # ──────────────────────────────────────────────
+  # Monitor summary
+  # ──────────────────────────────────────────────
+  monitor-summary:
+    name: Monitor Summary
+    runs-on: ubuntu-latest
+    needs: self-heal
+    if: always()
+    steps:
+      - name: Generate Summary
+        run: |
+          echo "## Cluster Monitor Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Self-heal result: **${{ needs.self-heal.result }}**" >> "$GITHUB_STEP_SUMMARY"
+          echo "Run: ${{ github.run_id }} — $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_STEP_SUMMARY"
