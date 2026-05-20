@@ -902,23 +902,24 @@ jobs:
         run: |
           PLAN_FILE="$PWD/terraform/environments/staging/tfplan.binary"
 
-          if [[ ! -f "$PLAN_FILE" ]]; then
-            echo "Plan file not found ($PLAN_FILE). Falling back to direct apply."
-            terraform -chdir=terraform/environments/staging apply \
-              -auto-approve \
-              -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
-              -var="app_image_tag=${{ steps.build_app.outputs.image_tag }}" \
-              2>&1 | tee apply_output.txt
-            exit ${PIPESTATUS[0]}
-          fi
-
           retry_apply() {
             local attempt=1
             local max_attempts=3
             while [[ $attempt -le $max_attempts ]]; do
               echo "Apply attempt $attempt/$max_attempts..."
-              terraform -chdir=terraform/environments/staging apply \
-                -auto-approve "$PLAN_FILE" 2>&1 | tee apply_output.txt
+
+              if [[ -f "$PLAN_FILE" ]]; then
+                terraform -chdir=terraform/environments/staging apply \
+                  -auto-approve "$PLAN_FILE" 2>&1 | tee apply_output.txt
+              else
+                echo "Plan file not found ($PLAN_FILE). Falling back to direct apply."
+                terraform -chdir=terraform/environments/staging apply \
+                  -auto-approve \
+                  -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
+                  -var="app_image_tag=${{ steps.build_app.outputs.image_tag }}" \
+                  2>&1 | tee apply_output.txt
+              fi
+
               apply_exit=${PIPESTATUS[0]}
               if [[ $apply_exit -eq 0 ]]; then return 0; fi
               if grep -qE "Error acquiring the state lock|RequestExpired|Throttling|rate exceeded|timeout" apply_output.txt; then
@@ -1463,23 +1464,24 @@ jobs:
         run: |
           PLAN_FILE="$PWD/terraform/environments/prod/tfplan.binary"
 
-          if [[ ! -f "$PLAN_FILE" ]]; then
-            echo "Plan file not found ($PLAN_FILE). Falling back to direct apply."
-            terraform -chdir=terraform/environments/prod apply \
-              -auto-approve \
-              -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
-              -var="app_image_tag=${{ steps.build_app.outputs.image_tag }}" \
-              2>&1 | tee apply_output.txt
-            exit ${PIPESTATUS[0]}
-          fi
-
           retry_apply() {
             local attempt=1
             local max_attempts=3
             while [[ $attempt -le $max_attempts ]]; do
               echo "Apply attempt $attempt/$max_attempts..."
-              terraform -chdir=terraform/environments/prod apply \
-                -auto-approve "$PLAN_FILE" 2>&1 | tee apply_output.txt
+
+              if [[ -f "$PLAN_FILE" ]]; then
+                terraform -chdir=terraform/environments/prod apply \
+                  -auto-approve "$PLAN_FILE" 2>&1 | tee apply_output.txt
+              else
+                echo "Plan file not found ($PLAN_FILE). Falling back to direct apply."
+                terraform -chdir=terraform/environments/prod apply \
+                  -auto-approve \
+                  -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
+                  -var="app_image_tag=${{ steps.build_app.outputs.image_tag }}" \
+                  2>&1 | tee apply_output.txt
+              fi
+
               apply_exit=${PIPESTATUS[0]}
               if [[ $apply_exit -eq 0 ]]; then return 0; fi
               if grep -qE "Error acquiring the state lock|RequestExpired|Throttling|rate exceeded|timeout" apply_output.txt; then
