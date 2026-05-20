@@ -901,6 +901,17 @@ jobs:
         id: apply
         run: |
           PLAN_FILE="$PWD/terraform/environments/staging/tfplan.binary"
+
+          if [[ ! -f "$PLAN_FILE" ]]; then
+            echo "Plan file not found ($PLAN_FILE). Falling back to direct apply."
+            terraform -chdir=terraform/environments/staging apply \
+              -auto-approve \
+              -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
+              -var="app_image_tag=${{ steps.build_app.outputs.image_tag }}" \
+              2>&1 | tee apply_output.txt
+            exit ${PIPESTATUS[0]}
+          fi
+
           retry_apply() {
             local attempt=1
             local max_attempts=3
@@ -1451,6 +1462,17 @@ jobs:
         if: steps.auto_approval.outcome == 'success'
         run: |
           PLAN_FILE="$PWD/terraform/environments/prod/tfplan.binary"
+
+          if [[ ! -f "$PLAN_FILE" ]]; then
+            echo "Plan file not found ($PLAN_FILE). Falling back to direct apply."
+            terraform -chdir=terraform/environments/prod apply \
+              -auto-approve \
+              -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
+              -var="app_image_tag=${{ steps.build_app.outputs.image_tag }}" \
+              2>&1 | tee apply_output.txt
+            exit ${PIPESTATUS[0]}
+          fi
+
           retry_apply() {
             local attempt=1
             local max_attempts=3
