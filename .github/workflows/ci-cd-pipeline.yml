@@ -882,29 +882,32 @@ jobs:
       - name: Terraform Plan (staging)
         id: plan
         run: |
+          PLAN_FILE="$PWD/terraform/environments/staging/tfplan.binary"
           terraform -chdir=terraform/environments/staging plan \
             -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
             -var="app_image_tag=${{ steps.build_app.outputs.image_tag }}" \
-            -out=tfplan.binary \
+            -out="$PLAN_FILE" \
             -detailed-exitcode 2>&1 | tee plan_output.txt
 
       - name: Cost Impact Analysis Agent
         id: cost_agent
         run: |
           chmod +x scripts/cost-impact-agent.sh
-          scripts/cost-impact-agent.sh staging tfplan.binary staging 2>&1 | tee cost_impact_output.txt
+          PLAN_FILE="$PWD/terraform/environments/staging/tfplan.binary"
+          scripts/cost-impact-agent.sh staging "$PLAN_FILE" staging 2>&1 | tee cost_impact_output.txt
         continue-on-error: true
 
       - name: Terraform Apply (staging)
         id: apply
         run: |
+          PLAN_FILE="$PWD/terraform/environments/staging/tfplan.binary"
           retry_apply() {
             local attempt=1
             local max_attempts=3
             while [[ $attempt -le $max_attempts ]]; do
               echo "Apply attempt $attempt/$max_attempts..."
               terraform -chdir=terraform/environments/staging apply \
-                -auto-approve tfplan.binary 2>&1 | tee apply_output.txt
+                -auto-approve "$PLAN_FILE" 2>&1 | tee apply_output.txt
               apply_exit=${PIPESTATUS[0]}
               if [[ $apply_exit -eq 0 ]]; then return 0; fi
               if grep -qE "Error acquiring the state lock|RequestExpired|Throttling|rate exceeded|timeout" apply_output.txt; then
@@ -1401,10 +1404,11 @@ jobs:
       - name: Terraform Plan (prod)
         id: plan
         run: |
+          PLAN_FILE="$PWD/terraform/environments/prod/tfplan.binary"
           terraform -chdir=terraform/environments/prod plan \
             -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
             -var="app_image_tag=${{ steps.build_app.outputs.image_tag }}" \
-            -out=tfplan.binary \
+            -out="$PLAN_FILE" \
             -detailed-exitcode 2>&1 | tee plan_output.txt
 
       - name: Final Security Scan (prod)
@@ -1446,13 +1450,14 @@ jobs:
         id: apply
         if: steps.auto_approval.outcome == 'success'
         run: |
+          PLAN_FILE="$PWD/terraform/environments/prod/tfplan.binary"
           retry_apply() {
             local attempt=1
             local max_attempts=3
             while [[ $attempt -le $max_attempts ]]; do
               echo "Apply attempt $attempt/$max_attempts..."
               terraform -chdir=terraform/environments/prod apply \
-                -auto-approve tfplan.binary 2>&1 | tee apply_output.txt
+                -auto-approve "$PLAN_FILE" 2>&1 | tee apply_output.txt
               apply_exit=${PIPESTATUS[0]}
               if [[ $apply_exit -eq 0 ]]; then return 0; fi
               if grep -qE "Error acquiring the state lock|RequestExpired|Throttling|rate exceeded|timeout" apply_output.txt; then
