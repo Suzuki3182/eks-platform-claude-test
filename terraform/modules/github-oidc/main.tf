@@ -110,6 +110,7 @@ data "aws_iam_policy_document" "terraform_state" {
     sid    = "TerraformStateS3"
     effect = "Allow"
     actions = [
+      "s3:HeadBucket",
       "s3:GetObject",
       "s3:PutObject",
       "s3:DeleteObject",
@@ -128,11 +129,27 @@ data "aws_iam_policy_document" "terraform_state" {
     actions = [
       "dynamodb:GetItem",
       "dynamodb:PutItem",
+      "dynamodb:UpdateItem",
       "dynamodb:DeleteItem",
       "dynamodb:DescribeTable",
     ]
     resources = [
       "arn:aws:dynamodb:${var.aws_region}:${var.aws_account_id}:table/eks-platform-tfstate-lock",
+    ]
+  }
+
+  # Required when backend bucket uses SSE-KMS with a customer-managed key.
+  statement {
+    sid    = "TerraformStateKMS"
+    effect = "Allow"
+    actions = [
+      "kms:DescribeKey",
+      "kms:Encrypt",
+      "kms:Decrypt",
+      "kms:GenerateDataKey",
+    ]
+    resources = [
+      "arn:aws:kms:${var.aws_region}:${var.aws_account_id}:key/*",
     ]
   }
 }
@@ -201,11 +218,15 @@ data "aws_iam_policy_document" "eks_operations" {
       "kms:ListKeys",
       "kms:PutKeyPolicy",
       "kms:ScheduleKeyDeletion",
+      "kms:ListResourceTags",
       "kms:TagResource",
       "kms:UntagResource",
       "kms:Decrypt",
       "kms:GenerateDataKey",
       "kms:ReEncrypt*",
+      "kms:CreateGrant",
+      "kms:RetireGrant",
+      "kms:RevokeGrant",
     ]
     resources = ["*"]
   }
@@ -221,6 +242,9 @@ data "aws_iam_policy_document" "eks_operations" {
       "logs:PutRetentionPolicy",
       "logs:TagLogGroup",
       "logs:UntagLogGroup",
+      "logs:ListTagsForResource",
+      "logs:TagResource",
+      "logs:UntagResource",
     ]
     resources = ["*"]
   }
