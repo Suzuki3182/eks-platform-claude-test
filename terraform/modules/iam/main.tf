@@ -20,6 +20,8 @@ locals {
 # EKS Cluster Role
 # ──────────────────────────────────────────────
 resource "aws_iam_role" "cluster" {
+  count = var.create_cluster_and_node_roles ? 1 : 0
+
   name = "${var.cluster_name}-cluster-role"
 
   assume_role_policy = jsonencode({
@@ -35,12 +37,16 @@ resource "aws_iam_role" "cluster" {
 }
 
 resource "aws_iam_role_policy_attachment" "cluster_policy" {
-  role       = aws_iam_role.cluster.name
+  count = var.create_cluster_and_node_roles ? 1 : 0
+
+  role       = aws_iam_role.cluster[0].name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy"
 }
 
 resource "aws_iam_role_policy_attachment" "cluster_vpc_controller" {
-  role       = aws_iam_role.cluster.name
+  count = var.create_cluster_and_node_roles ? 1 : 0
+
+  role       = aws_iam_role.cluster[0].name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKSVPCResourceController"
 }
 
@@ -48,6 +54,8 @@ resource "aws_iam_role_policy_attachment" "cluster_vpc_controller" {
 # EKS Node Role
 # ──────────────────────────────────────────────
 resource "aws_iam_role" "node" {
+  count = var.create_cluster_and_node_roles ? 1 : 0
+
   name = "${var.cluster_name}-node-role"
 
   assume_role_policy = jsonencode({
@@ -63,22 +71,30 @@ resource "aws_iam_role" "node" {
 }
 
 resource "aws_iam_role_policy_attachment" "node_worker" {
-  role       = aws_iam_role.node.name
+  count = var.create_cluster_and_node_roles ? 1 : 0
+
+  role       = aws_iam_role.node[0].name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
 }
 
 resource "aws_iam_role_policy_attachment" "node_cni" {
-  role       = aws_iam_role.node.name
+  count = var.create_cluster_and_node_roles ? 1 : 0
+
+  role       = aws_iam_role.node[0].name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
 }
 
 resource "aws_iam_role_policy_attachment" "node_ecr_readonly" {
-  role       = aws_iam_role.node.name
+  count = var.create_cluster_and_node_roles ? 1 : 0
+
+  role       = aws_iam_role.node[0].name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
 }
 
 resource "aws_iam_role_policy_attachment" "node_ssm" {
-  role       = aws_iam_role.node.name
+  count = var.create_cluster_and_node_roles ? 1 : 0
+
+  role       = aws_iam_role.node[0].name
   policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
 }
 
@@ -86,6 +102,8 @@ resource "aws_iam_role_policy_attachment" "node_ssm" {
 # VPC CNI IRSA
 # ──────────────────────────────────────────────
 resource "aws_iam_role" "vpc_cni" {
+  count = var.create_irsa_roles ? 1 : 0
+
   name = "${var.cluster_name}-vpc-cni"
 
   assume_role_policy = jsonencode({
@@ -107,7 +125,9 @@ resource "aws_iam_role" "vpc_cni" {
 }
 
 resource "aws_iam_role_policy_attachment" "vpc_cni" {
-  role       = aws_iam_role.vpc_cni.name
+  count = var.create_irsa_roles ? 1 : 0
+
+  role       = aws_iam_role.vpc_cni[0].name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
 }
 
@@ -115,6 +135,8 @@ resource "aws_iam_role_policy_attachment" "vpc_cni" {
 # EBS CSI Driver IRSA
 # ──────────────────────────────────────────────
 resource "aws_iam_role" "ebs_csi" {
+  count = var.create_irsa_roles ? 1 : 0
+
   name = "${var.cluster_name}-ebs-csi"
 
   assume_role_policy = jsonencode({
@@ -136,7 +158,9 @@ resource "aws_iam_role" "ebs_csi" {
 }
 
 resource "aws_iam_role_policy_attachment" "ebs_csi" {
-  role       = aws_iam_role.ebs_csi.name
+  count = var.create_irsa_roles ? 1 : 0
+
+  role       = aws_iam_role.ebs_csi[0].name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonEBSCSIDriverPolicy"
 }
 
@@ -144,6 +168,8 @@ resource "aws_iam_role_policy_attachment" "ebs_csi" {
 # AWS Load Balancer Controller IRSA
 # ──────────────────────────────────────────────
 resource "aws_iam_role" "lbc" {
+  count = var.create_irsa_roles ? 1 : 0
+
   name = "${var.cluster_name}-aws-lbc"
 
   assume_role_policy = jsonencode({
@@ -165,6 +191,8 @@ resource "aws_iam_role" "lbc" {
 }
 
 resource "aws_iam_policy" "lbc" {
+  count = var.create_irsa_roles ? 1 : 0
+
   #tfsec:ignore:aws-iam-no-policy-wildcards:exp:2027-04-21
   # AWS Load Balancer Controller requires wildcard actions/resources; scope is constrained by IRSA and tag conditions.
   name        = "${var.cluster_name}-aws-lbc-policy"
@@ -385,14 +413,18 @@ resource "aws_iam_policy" "lbc" {
 }
 
 resource "aws_iam_role_policy_attachment" "lbc" {
-  role       = aws_iam_role.lbc.name
-  policy_arn = aws_iam_policy.lbc.arn
+  count = var.create_irsa_roles ? 1 : 0
+
+  role       = aws_iam_role.lbc[0].name
+  policy_arn = aws_iam_policy.lbc[0].arn
 }
 
 # ──────────────────────────────────────────────
 # Cluster Autoscaler IRSA
 # ──────────────────────────────────────────────
 resource "aws_iam_role" "cluster_autoscaler" {
+  count = var.create_irsa_roles ? 1 : 0
+
   name = "${var.cluster_name}-cluster-autoscaler"
 
   assume_role_policy = jsonencode({
@@ -414,6 +446,8 @@ resource "aws_iam_role" "cluster_autoscaler" {
 }
 
 resource "aws_iam_policy" "cluster_autoscaler" {
+  count = var.create_irsa_roles ? 1 : 0
+
   #tfsec:ignore:aws-iam-no-policy-wildcards:exp:2027-04-21
   # Cluster Autoscaler uses read/list APIs that do not support strict resource scoping; write APIs are tag-restricted.
   name        = "${var.cluster_name}-cluster-autoscaler-policy"
@@ -458,6 +492,8 @@ resource "aws_iam_policy" "cluster_autoscaler" {
 }
 
 resource "aws_iam_role_policy_attachment" "cluster_autoscaler" {
-  role       = aws_iam_role.cluster_autoscaler.name
-  policy_arn = aws_iam_policy.cluster_autoscaler.arn
+  count = var.create_irsa_roles ? 1 : 0
+
+  role       = aws_iam_role.cluster_autoscaler[0].name
+  policy_arn = aws_iam_policy.cluster_autoscaler[0].arn
 }

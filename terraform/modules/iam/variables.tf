@@ -33,3 +33,15 @@ variable "tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "create_cluster_and_node_roles" {
+  description = "Whether to create EKS cluster and node IAM roles"
+  type        = bool
+  default     = true
+}
+
+variable "create_irsa_roles" {
+  description = "Whether to create IRSA IAM roles and policies for addons"
+  type        = bool
+  default     = true
+}

@@ -1,34 +1,34 @@
 output "lbc_role_arn" {
   description = "IAM role ARN for AWS Load Balancer Controller"
-  value       = aws_iam_role.lbc.arn
+  value       = try(aws_iam_role.lbc[0].arn, null)
 }
 
 output "cluster_autoscaler_role_arn" {
   description = "IAM role ARN for Cluster Autoscaler"
-  value       = aws_iam_role.cluster_autoscaler.arn
+  value       = try(aws_iam_role.cluster_autoscaler[0].arn, null)
 }
 
 output "vpc_cni_role_arn" {
   description = "IAM role ARN for VPC CNI"
-  value       = aws_iam_role.vpc_cni.arn
+  value       = try(aws_iam_role.vpc_cni[0].arn, null)
 }
 
 output "ebs_csi_role_arn" {
   description = "IAM role ARN for EBS CSI Driver"
-  value       = aws_iam_role.ebs_csi.arn
+  value       = try(aws_iam_role.ebs_csi[0].arn, null)
 }
 
 output "node_role_arn" {
   description = "IAM role ARN for EKS worker nodes"
-  value       = aws_iam_role.node.arn
+  value       = try(aws_iam_role.node[0].arn, null)
 }
 
 output "node_role_name" {
   description = "IAM role name for EKS worker nodes"
-  value       = aws_iam_role.node.name
+  value       = try(aws_iam_role.node[0].name, null)
 }
 
 output "cluster_role_arn" {
   description = "IAM role ARN for EKS cluster"
-  value       = aws_iam_role.cluster.arn
+  value       = try(aws_iam_role.cluster[0].arn, null)
 }

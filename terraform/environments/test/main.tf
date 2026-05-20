@@ -212,6 +212,8 @@ module "iam" {
   aws_region        = var.aws_region
   aws_account_id    = var.aws_account_id
   vpc_id            = module.vpc.vpc_id
+  create_cluster_and_node_roles = false
+  create_irsa_roles             = true
 
   tags = local.common_tags
 
@@ -273,6 +275,8 @@ module "iam_bootstrap" {
   aws_region        = var.aws_region
   aws_account_id    = var.aws_account_id
   vpc_id            = module.vpc.vpc_id
+  create_cluster_and_node_roles = true
+  create_irsa_roles             = false
 
   tags = local.common_tags
 }
@@ -327,5 +331,22 @@ module "app" {
   ingress_scheme   = "internet-facing"
 
   depends_on = [module.addons]
+}
+
+# ──────────────────────────────────────────────
+# GitHub Actions OIDC
+# Creates the account-level provider (once) and
+# the test deployment role.
+# ──────────────────────────────────────────────
+module "github_oidc" {
+  source = "../../modules/github-oidc"
+
+  github_repo          = var.github_repo
+  environment          = var.environment
+  aws_account_id       = var.aws_account_id
+  aws_region           = var.aws_region
+  create_oidc_provider = true
+
+  tags = local.common_tags
 }
 

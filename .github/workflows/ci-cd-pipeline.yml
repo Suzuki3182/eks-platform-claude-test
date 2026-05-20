@@ -337,6 +337,62 @@ jobs:
             fi
           done
 
+      - name: Import existing IAM artifacts into Terraform state (test)
+        run: |
+          set -euo pipefail
+
+          TF_DIR="terraform/environments/test"
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+          import_role_if_needed() {
+            local tf_addr="$1"
+            local role_name="$2"
+
+            if ! aws iam get-role --role-name "$role_name" >/dev/null 2>&1; then
+              return 0
+            fi
+
+            if terraform -chdir="$TF_DIR" state show "$tf_addr" >/dev/null 2>&1; then
+              echo "State already contains $tf_addr"
+              return 0
+            fi
+
+            echo "Importing IAM role $role_name into $tf_addr"
+            terraform -chdir="$TF_DIR" import "$tf_addr" "$role_name"
+          }
+
+          import_policy_if_needed() {
+            local tf_addr="$1"
+            local policy_name="$2"
+            local policy_arn
+
+            policy_arn=$(aws iam list-policies --scope Local --query "Policies[?PolicyName=='$policy_name'].Arn | [0]" --output text)
+            if [[ -z "$policy_arn" || "$policy_arn" == "None" ]]; then
+              return 0
+            fi
+
+            if terraform -chdir="$TF_DIR" state show "$tf_addr" >/dev/null 2>&1; then
+              echo "State already contains $tf_addr"
+              return 0
+            fi
+
+            echo "Importing IAM policy $policy_name into $tf_addr"
+            terraform -chdir="$TF_DIR" import "$tf_addr" "$policy_arn"
+          }
+
+          PROJECT=$(awk -F'=' '/^project/{gsub(/[ "\t]/, "", $2); print $2}' "$TF_DIR/terraform.tfvars")
+          ENVIRONMENT=$(awk -F'=' '/^environment/{gsub(/[ "\t]/, "", $2); print $2}' "$TF_DIR/terraform.tfvars")
+          CLUSTER_NAME="${PROJECT}-${ENVIRONMENT}"
+
+          import_role_if_needed "module.iam_bootstrap.aws_iam_role.cluster[0]" "${CLUSTER_NAME}-cluster-role"
+          import_role_if_needed "module.iam_bootstrap.aws_iam_role.node[0]" "${CLUSTER_NAME}-node-role"
+          import_role_if_needed "module.iam.aws_iam_role.vpc_cni[0]" "${CLUSTER_NAME}-vpc-cni"
+          import_role_if_needed "module.iam.aws_iam_role.ebs_csi[0]" "${CLUSTER_NAME}-ebs-csi"
+          import_role_if_needed "module.iam.aws_iam_role.lbc[0]" "${CLUSTER_NAME}-aws-lbc"
+          import_policy_if_needed "module.iam.aws_iam_policy.lbc[0]" "${CLUSTER_NAME}-aws-lbc-policy"
+          import_role_if_needed "module.iam.aws_iam_role.cluster_autoscaler[0]" "${CLUSTER_NAME}-cluster-autoscaler"
+          import_policy_if_needed "module.iam.aws_iam_policy.cluster_autoscaler[0]" "${CLUSTER_NAME}-cluster-autoscaler-policy"
+
       - name: Bootstrap ECR & Build App Image
         id: build_app
         run: |
