@@ -1013,7 +1013,6 @@ jobs:
                   -target=module.eks \
                   -target=module.iam \
                   -target=module.ecr \
-                  -target=module.github_oidc \
                   2>&1 | tee apply_output.txt
                 return ${PIPESTATUS[0]}
               fi
@@ -1671,7 +1670,6 @@ jobs:
                   -target=module.eks \
                   -target=module.iam \
                   -target=module.ecr \
-                  -target=module.github_oidc \
                   2>&1 | tee apply_output.txt
                 return ${PIPESTATUS[0]}
               fi
