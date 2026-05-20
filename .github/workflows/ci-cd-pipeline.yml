@@ -844,6 +844,77 @@ jobs:
       - name: Terraform Init (staging)
         run: terraform -chdir=terraform/environments/staging init
 
+      - name: Import existing GitHub OIDC IAM artifacts (staging)
+        run: |
+          set -euo pipefail
+
+          TF_DIR="terraform/environments/staging"
+
+          import_role_if_needed() {
+            local tf_addr="$1"
+            local role_name="$2"
+
+            if ! aws iam get-role --role-name "$role_name" >/dev/null 2>&1; then
+              return 0
+            fi
+
+            if terraform -chdir="$TF_DIR" state show "$tf_addr" >/dev/null 2>&1; then
+              echo "State already contains $tf_addr"
+              return 0
+            fi
+
+            set +e
+            import_output=$(terraform -chdir="$TF_DIR" import "$tf_addr" "$role_name" 2>&1)
+            import_exit=$?
+            set -e
+
+            if [[ $import_exit -ne 0 ]]; then
+              echo "$import_output"
+              if echo "$import_output" | grep -q "Resource already managed by Terraform"; then
+                echo "Import skipped: $tf_addr already managed."
+                return 0
+              fi
+              return $import_exit
+            fi
+          }
+
+          import_policy_if_needed() {
+            local tf_addr="$1"
+            local policy_name="$2"
+            local policy_arn
+
+            policy_arn=$(aws iam list-policies --scope Local --query "Policies[?PolicyName=='$policy_name'].Arn | [0]" --output text)
+            if [[ -z "$policy_arn" || "$policy_arn" == "None" ]]; then
+              return 0
+            fi
+
+            if terraform -chdir="$TF_DIR" state show "$tf_addr" >/dev/null 2>&1; then
+              echo "State already contains $tf_addr"
+              return 0
+            fi
+
+            set +e
+            import_output=$(terraform -chdir="$TF_DIR" import "$tf_addr" "$policy_arn" 2>&1)
+            import_exit=$?
+            set -e
+
+            if [[ $import_exit -ne 0 ]]; then
+              echo "$import_output"
+              if echo "$import_output" | grep -q "Resource already managed by Terraform"; then
+                echo "Import skipped: $tf_addr already managed."
+                return 0
+              fi
+              return $import_exit
+            fi
+          }
+
+          PROJECT=$(awk -F'=' '/^project/{gsub(/[ "\t]/, "", $2); print $2}' "$TF_DIR/terraform.tfvars")
+          ENVIRONMENT=$(awk -F'=' '/^environment/{gsub(/[ "\t]/, "", $2); print $2}' "$TF_DIR/terraform.tfvars")
+          CLUSTER_NAME="${PROJECT}-${ENVIRONMENT}"
+
+          import_role_if_needed "module.github_oidc.aws_iam_role.github_actions" "${CLUSTER_NAME}-github-actions"
+          import_policy_if_needed "module.github_oidc.aws_iam_policy.terraform_state" "${CLUSTER_NAME}-github-actions-tfstate-${ENVIRONMENT}"
+
       - name: Bootstrap ECR & Build App Image
         id: build_app
         run: |
@@ -922,6 +993,32 @@ jobs:
 
               apply_exit=${PIPESTATUS[0]}
               if [[ $apply_exit -eq 0 ]]; then return 0; fi
+
+              if grep -q "Saved plan is stale" apply_output.txt; then
+                echo "Saved plan became stale. Removing plan file and retrying with fresh direct apply."
+                rm -f "$PLAN_FILE"
+                ((attempt++))
+                continue
+              fi
+
+              if grep -q "Kubernetes cluster unreachable" apply_output.txt; then
+                echo "Kubernetes API unreachable from runner. Applying infra-only targets and deferring in-cluster resources."
+                terraform -chdir=terraform/environments/staging apply \
+                  -auto-approve \
+                  -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
+                  -var="app_image_tag=${{ steps.build_app.outputs.image_tag }}" \
+                  -target=aws_kms_key.eks \
+                  -target=aws_kms_alias.eks \
+                  -target=module.vpc \
+                  -target=module.iam_bootstrap \
+                  -target=module.eks \
+                  -target=module.iam \
+                  -target=module.ecr \
+                  -target=module.github_oidc \
+                  2>&1 | tee apply_output.txt
+                return ${PIPESTATUS[0]}
+              fi
+
               if grep -qE "Error acquiring the state lock|RequestExpired|Throttling|rate exceeded|timeout" apply_output.txt; then
                 LOCK_ID=$(awk '/^│   ID:/{print $3; exit}' apply_output.txt | tr -d '\r')
                 if [[ -n "$LOCK_ID" ]]; then
