@@ -358,7 +358,19 @@ jobs:
             fi
 
             echo "Importing IAM role $role_name into $tf_addr"
-            terraform -chdir="$TF_DIR" import "$tf_addr" "$role_name"
+            set +e
+            import_output=$(terraform -chdir="$TF_DIR" import "$tf_addr" "$role_name" 2>&1)
+            import_exit=$?
+            set -e
+
+            if [[ $import_exit -ne 0 ]]; then
+              echo "$import_output"
+              if echo "$import_output" | grep -q "Resource already managed by Terraform"; then
+                echo "Import skipped: $tf_addr is already managed in state."
+                return 0
+              fi
+              return $import_exit
+            fi
           }
 
           import_policy_if_needed() {
@@ -377,7 +389,19 @@ jobs:
             fi
 
             echo "Importing IAM policy $policy_name into $tf_addr"
-            terraform -chdir="$TF_DIR" import "$tf_addr" "$policy_arn"
+            set +e
+            import_output=$(terraform -chdir="$TF_DIR" import "$tf_addr" "$policy_arn" 2>&1)
+            import_exit=$?
+            set -e
+
+            if [[ $import_exit -ne 0 ]]; then
+              echo "$import_output"
+              if echo "$import_output" | grep -q "Resource already managed by Terraform"; then
+                echo "Import skipped: $tf_addr is already managed in state."
+                return 0
+              fi
+              return $import_exit
+            fi
           }
 
           PROJECT=$(awk -F'=' '/^project/{gsub(/[ "\t]/, "", $2); print $2}' "$TF_DIR/terraform.tfvars")
