@@ -206,12 +206,12 @@ module "vpc" {
 module "iam" {
   source = "../../modules/iam"
 
-  cluster_name      = local.cluster_name
-  oidc_provider_arn = module.eks.oidc_provider_arn
-  oidc_issuer_url   = module.eks.oidc_issuer_url
-  aws_region        = var.aws_region
-  aws_account_id    = var.aws_account_id
-  vpc_id            = module.vpc.vpc_id
+  cluster_name                  = local.cluster_name
+  oidc_provider_arn             = module.eks.oidc_provider_arn
+  oidc_issuer_url               = module.eks.oidc_issuer_url
+  aws_region                    = var.aws_region
+  aws_account_id                = var.aws_account_id
+  vpc_id                        = module.vpc.vpc_id
   create_cluster_and_node_roles = false
   create_irsa_roles             = true
 
@@ -269,12 +269,12 @@ module "eks" {
 module "iam_bootstrap" {
   source = "../../modules/iam"
 
-  cluster_name      = local.cluster_name
-  oidc_provider_arn = "arn:aws:iam::${var.aws_account_id}:oidc-provider/placeholder"
-  oidc_issuer_url   = "https://placeholder"
-  aws_region        = var.aws_region
-  aws_account_id    = var.aws_account_id
-  vpc_id            = module.vpc.vpc_id
+  cluster_name                  = local.cluster_name
+  oidc_provider_arn             = "arn:aws:iam::${var.aws_account_id}:oidc-provider/placeholder"
+  oidc_issuer_url               = "https://placeholder"
+  aws_region                    = var.aws_region
+  aws_account_id                = var.aws_account_id
+  vpc_id                        = module.vpc.vpc_id
   create_cluster_and_node_roles = true
   create_irsa_roles             = false
 
