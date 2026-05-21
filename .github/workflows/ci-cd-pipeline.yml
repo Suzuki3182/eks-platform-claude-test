@@ -1017,6 +1017,22 @@ jobs:
                 return ${PIPESTATUS[0]}
               fi
 
+              if grep -qE "Unsupported Kubernetes minor version update|DeleteConflict: Cannot delete a policy attached to entities" apply_output.txt; then
+                echo "Detected immutable EKS version drift and/or IAM policy delete conflict. Applying safe targeted subset (excluding module.eks and module.github_oidc)."
+                terraform -chdir=terraform/environments/staging apply \
+                  -auto-approve \
+                  -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
+                  -var="app_image_tag=${{ steps.build_app.outputs.image_tag }}" \
+                  -target=aws_kms_key.eks \
+                  -target=aws_kms_alias.eks \
+                  -target=module.vpc \
+                  -target=module.iam_bootstrap \
+                  -target=module.iam \
+                  -target=module.ecr \
+                  2>&1 | tee apply_output.txt
+                return ${PIPESTATUS[0]}
+              fi
+
               if grep -qE "Error acquiring the state lock|RequestExpired|Throttling|rate exceeded|timeout" apply_output.txt; then
                 LOCK_ID=$(awk '/^│   ID:/{print $3; exit}' apply_output.txt | tr -d '\r')
                 if [[ -n "$LOCK_ID" ]]; then
@@ -1668,6 +1684,22 @@ jobs:
                   -target=module.vpc \
                   -target=module.iam_bootstrap \
                   -target=module.eks \
+                  -target=module.iam \
+                  -target=module.ecr \
+                  2>&1 | tee apply_output.txt
+                return ${PIPESTATUS[0]}
+              fi
+
+              if grep -qE "Unsupported Kubernetes minor version update|DeleteConflict: Cannot delete a policy attached to entities" apply_output.txt; then
+                echo "Detected immutable EKS version drift and/or IAM policy delete conflict. Applying safe targeted subset (excluding module.eks and module.github_oidc)."
+                terraform -chdir=terraform/environments/prod apply \
+                  -auto-approve \
+                  -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
+                  -var="app_image_tag=${{ steps.build_app.outputs.image_tag }}" \
+                  -target=aws_kms_key.eks \
+                  -target=aws_kms_alias.eks \
+                  -target=module.vpc \
+                  -target=module.iam_bootstrap \
                   -target=module.iam \
                   -target=module.ecr \
                   2>&1 | tee apply_output.txt
