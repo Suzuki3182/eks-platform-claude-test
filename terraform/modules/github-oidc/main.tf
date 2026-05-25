@@ -190,6 +190,11 @@ resource "aws_iam_role_policy_attachment" "vpc_full" {
   policy_arn = "arn:aws:iam::aws:policy/AmazonVPCFullAccess"
 }
 
+resource "aws_iam_role_policy_attachment" "ecr_power_user" {
+  role       = aws_iam_role.github_actions.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser"
+}
+
 # ──────────────────────────────────────────────
 # Inline policy for EKS, KMS, CloudWatch, DynamoDB
 # permissions not covered by managed policies
