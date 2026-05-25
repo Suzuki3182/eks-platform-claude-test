@@ -988,18 +988,22 @@ jobs:
               return 0
             fi
 
-            if terraform -chdir="$TF_DIR" state show "$tf_addr" >/dev/null 2>&1; then
+            if timeout 30s terraform -chdir="$TF_DIR" state show "$tf_addr" >/dev/null 2>&1; then
               echo "State already contains $tf_addr"
               return 0
             fi
 
             set +e
-            import_output=$(terraform -chdir="$TF_DIR" import "$tf_addr" "$alias_name" 2>&1)
+            import_output=$(timeout 240s terraform -chdir="$TF_DIR" import "$tf_addr" "$alias_name" 2>&1)
             import_exit=$?
             set -e
 
             if [[ $import_exit -ne 0 ]]; then
               echo "$import_output"
+              if [[ $import_exit -eq 124 ]]; then
+                echo "Import timed out for $tf_addr. Skipping pre-import to avoid blocking pipeline."
+                return 0
+              fi
               if echo "$import_output" | grep -q "Resource already managed by Terraform"; then
                 echo "Import skipped: $tf_addr already managed."
                 return 0
@@ -1020,18 +1024,22 @@ jobs:
               return 0
             fi
 
-            if terraform -chdir="$TF_DIR" state show "$tf_addr" >/dev/null 2>&1; then
+            if timeout 30s terraform -chdir="$TF_DIR" state show "$tf_addr" >/dev/null 2>&1; then
               echo "State already contains $tf_addr"
               return 0
             fi
 
             set +e
-            import_output=$(terraform -chdir="$TF_DIR" import "$tf_addr" "$role_name" 2>&1)
+            import_output=$(timeout 240s terraform -chdir="$TF_DIR" import "$tf_addr" "$role_name" 2>&1)
             import_exit=$?
             set -e
 
             if [[ $import_exit -ne 0 ]]; then
               echo "$import_output"
+              if [[ $import_exit -eq 124 ]]; then
+                echo "Import timed out for $tf_addr. Skipping pre-import to avoid blocking pipeline."
+                return 0
+              fi
               if echo "$import_output" | grep -q "Resource already managed by Terraform"; then
                 echo "Import skipped: $tf_addr already managed."
                 return 0
@@ -1054,18 +1062,22 @@ jobs:
               return 0
             fi
 
-            if terraform -chdir="$TF_DIR" state show "$tf_addr" >/dev/null 2>&1; then
+            if timeout 30s terraform -chdir="$TF_DIR" state show "$tf_addr" >/dev/null 2>&1; then
               echo "State already contains $tf_addr"
               return 0
             fi
 
             set +e
-            import_output=$(terraform -chdir="$TF_DIR" import "$tf_addr" "$policy_arn" 2>&1)
+            import_output=$(timeout 240s terraform -chdir="$TF_DIR" import "$tf_addr" "$policy_arn" 2>&1)
             import_exit=$?
             set -e
 
             if [[ $import_exit -ne 0 ]]; then
               echo "$import_output"
+              if [[ $import_exit -eq 124 ]]; then
+                echo "Import timed out for $tf_addr. Skipping pre-import to avoid blocking pipeline."
+                return 0
+              fi
               if echo "$import_output" | grep -q "Resource already managed by Terraform"; then
                 echo "Import skipped: $tf_addr already managed."
                 return 0
@@ -1738,18 +1750,22 @@ jobs:
               return 0
             fi
 
-            if terraform -chdir="$TF_DIR" state show "$tf_addr" >/dev/null 2>&1; then
+            if timeout 30s terraform -chdir="$TF_DIR" state show "$tf_addr" >/dev/null 2>&1; then
               echo "State already contains $tf_addr"
               return 0
             fi
 
             set +e
-            import_output=$(terraform -chdir="$TF_DIR" import "$tf_addr" "$alias_name" 2>&1)
+            import_output=$(timeout 240s terraform -chdir="$TF_DIR" import "$tf_addr" "$alias_name" 2>&1)
             import_exit=$?
             set -e
 
             if [[ $import_exit -ne 0 ]]; then
               echo "$import_output"
+              if [[ $import_exit -eq 124 ]]; then
+                echo "Import timed out for $tf_addr. Skipping pre-import to avoid blocking pipeline."
+                return 0
+              fi
               if echo "$import_output" | grep -q "Resource already managed by Terraform"; then
                 echo "Import skipped: $tf_addr already managed."
                 return 0
@@ -1770,18 +1786,22 @@ jobs:
               return 0
             fi
 
-            if terraform -chdir="$TF_DIR" state show "$tf_addr" >/dev/null 2>&1; then
+            if timeout 30s terraform -chdir="$TF_DIR" state show "$tf_addr" >/dev/null 2>&1; then
               echo "State already contains $tf_addr"
               return 0
             fi
 
             set +e
-            import_output=$(terraform -chdir="$TF_DIR" import "$tf_addr" "$role_name" 2>&1)
+            import_output=$(timeout 240s terraform -chdir="$TF_DIR" import "$tf_addr" "$role_name" 2>&1)
             import_exit=$?
             set -e
 
             if [[ $import_exit -ne 0 ]]; then
               echo "$import_output"
+              if [[ $import_exit -eq 124 ]]; then
+                echo "Import timed out for $tf_addr. Skipping pre-import to avoid blocking pipeline."
+                return 0
+              fi
               if echo "$import_output" | grep -q "Resource already managed by Terraform"; then
                 echo "Import skipped: $tf_addr already managed."
                 return 0
@@ -1804,18 +1824,22 @@ jobs:
               return 0
             fi
 
-            if terraform -chdir="$TF_DIR" state show "$tf_addr" >/dev/null 2>&1; then
+            if timeout 30s terraform -chdir="$TF_DIR" state show "$tf_addr" >/dev/null 2>&1; then
               echo "State already contains $tf_addr"
               return 0
             fi
 
             set +e
-            import_output=$(terraform -chdir="$TF_DIR" import "$tf_addr" "$policy_arn" 2>&1)
+            import_output=$(timeout 240s terraform -chdir="$TF_DIR" import "$tf_addr" "$policy_arn" 2>&1)
             import_exit=$?
             set -e
 
             if [[ $import_exit -ne 0 ]]; then
               echo "$import_output"
+              if [[ $import_exit -eq 124 ]]; then
+                echo "Import timed out for $tf_addr. Skipping pre-import to avoid blocking pipeline."
+                return 0
+              fi
               if echo "$import_output" | grep -q "Resource already managed by Terraform"; then
                 echo "Import skipped: $tf_addr already managed."
                 return 0
