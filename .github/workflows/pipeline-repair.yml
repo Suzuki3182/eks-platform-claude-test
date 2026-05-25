@@ -143,7 +143,7 @@ jobs:
           echo "Failure context: stage=$STAGE failure_type=$FAILURE_TYPE"
 
       - name: Configure AWS Credentials — test
-        if: steps.failure_context.outputs.stage == 'test'
+        if: steps.failure_context.outputs.stage == 'test' && steps.failure_context.outputs.failure_type != 'AWS_OIDC'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_TEST }}
@@ -151,7 +151,7 @@ jobs:
           aws-region: us-east-1
 
       - name: Configure AWS Credentials — staging
-        if: steps.failure_context.outputs.stage == 'staging'
+        if: steps.failure_context.outputs.stage == 'staging' && steps.failure_context.outputs.failure_type != 'AWS_OIDC'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_STAGING }}
@@ -159,7 +159,7 @@ jobs:
           aws-region: us-east-1
 
       - name: Configure AWS Credentials — prod
-        if: steps.failure_context.outputs.stage == 'prod'
+        if: steps.failure_context.outputs.stage == 'prod' && steps.failure_context.outputs.failure_type != 'AWS_OIDC'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_PROD }}
