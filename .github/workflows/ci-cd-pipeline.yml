@@ -980,6 +980,38 @@ jobs:
 
           TF_DIR="terraform/environments/staging"
 
+          import_kms_alias_if_needed() {
+            local tf_addr="$1"
+            local alias_name="$2"
+
+            if ! aws kms describe-key --key-id "$alias_name" >/dev/null 2>&1; then
+              return 0
+            fi
+
+            if terraform -chdir="$TF_DIR" state show "$tf_addr" >/dev/null 2>&1; then
+              echo "State already contains $tf_addr"
+              return 0
+            fi
+
+            set +e
+            import_output=$(terraform -chdir="$TF_DIR" import "$tf_addr" "$alias_name" 2>&1)
+            import_exit=$?
+            set -e
+
+            if [[ $import_exit -ne 0 ]]; then
+              echo "$import_output"
+              if echo "$import_output" | grep -q "Resource already managed by Terraform"; then
+                echo "Import skipped: $tf_addr already managed."
+                return 0
+              fi
+              if echo "$import_output" | grep -Eq "Invalid provider configuration|depends on values that cannot be determined until apply"; then
+                echo "Import skipped: provider config depends on values not yet known until apply."
+                return 0
+              fi
+              return $import_exit
+            fi
+          }
+
           import_role_if_needed() {
             local tf_addr="$1"
             local role_name="$2"
@@ -1048,9 +1080,19 @@ jobs:
 
           PROJECT=$(awk -F'=' '/^project/{gsub(/[ "\t]/, "", $2); print $2}' "$TF_DIR/terraform.tfvars")
           ENVIRONMENT=$(awk -F'=' '/^environment/{gsub(/[ "\t]/, "", $2); print $2}' "$TF_DIR/terraform.tfvars")
+          CLUSTER_NAME="${PROJECT}-${ENVIRONMENT}"
 
+          import_role_if_needed "module.iam_bootstrap.aws_iam_role.cluster[0]" "${CLUSTER_NAME}-cluster-role"
+          import_role_if_needed "module.iam_bootstrap.aws_iam_role.node[0]" "${CLUSTER_NAME}-node-role"
+          import_role_if_needed "module.iam.aws_iam_role.vpc_cni[0]" "${CLUSTER_NAME}-vpc-cni"
+          import_role_if_needed "module.iam.aws_iam_role.ebs_csi[0]" "${CLUSTER_NAME}-ebs-csi"
+          import_role_if_needed "module.iam.aws_iam_role.lbc[0]" "${CLUSTER_NAME}-aws-lbc"
+          import_policy_if_needed "module.iam.aws_iam_policy.lbc[0]" "${CLUSTER_NAME}-aws-lbc-policy"
+          import_role_if_needed "module.iam.aws_iam_role.cluster_autoscaler[0]" "${CLUSTER_NAME}-cluster-autoscaler"
+          import_policy_if_needed "module.iam.aws_iam_policy.cluster_autoscaler[0]" "${CLUSTER_NAME}-cluster-autoscaler-policy"
           import_role_if_needed "module.github_oidc.aws_iam_role.github_actions" "${PROJECT}-github-actions-${ENVIRONMENT}"
           import_policy_if_needed "module.github_oidc.aws_iam_policy.terraform_state" "${PROJECT}-github-actions-tfstate-${ENVIRONMENT}"
+          import_kms_alias_if_needed "aws_kms_alias.eks" "alias/${CLUSTER_NAME}"
 
       - name: Bootstrap ECR & Build App Image
         id: build_app
@@ -1688,6 +1730,38 @@ jobs:
 
           TF_DIR="terraform/environments/prod"
 
+          import_kms_alias_if_needed() {
+            local tf_addr="$1"
+            local alias_name="$2"
+
+            if ! aws kms describe-key --key-id "$alias_name" >/dev/null 2>&1; then
+              return 0
+            fi
+
+            if terraform -chdir="$TF_DIR" state show "$tf_addr" >/dev/null 2>&1; then
+              echo "State already contains $tf_addr"
+              return 0
+            fi
+
+            set +e
+            import_output=$(terraform -chdir="$TF_DIR" import "$tf_addr" "$alias_name" 2>&1)
+            import_exit=$?
+            set -e
+
+            if [[ $import_exit -ne 0 ]]; then
+              echo "$import_output"
+              if echo "$import_output" | grep -q "Resource already managed by Terraform"; then
+                echo "Import skipped: $tf_addr already managed."
+                return 0
+              fi
+              if echo "$import_output" | grep -Eq "Invalid provider configuration|depends on values that cannot be determined until apply"; then
+                echo "Import skipped: provider config depends on values not yet known until apply."
+                return 0
+              fi
+              return $import_exit
+            fi
+          }
+
           import_role_if_needed() {
             local tf_addr="$1"
             local role_name="$2"
@@ -1756,9 +1830,19 @@ jobs:
 
           PROJECT=$(awk -F'=' '/^project/{gsub(/[ "\t]/, "", $2); print $2}' "$TF_DIR/terraform.tfvars")
           ENVIRONMENT=$(awk -F'=' '/^environment/{gsub(/[ "\t]/, "", $2); print $2}' "$TF_DIR/terraform.tfvars")
+          CLUSTER_NAME="${PROJECT}-${ENVIRONMENT}"
 
+          import_role_if_needed "module.iam_bootstrap.aws_iam_role.cluster[0]" "${CLUSTER_NAME}-cluster-role"
+          import_role_if_needed "module.iam_bootstrap.aws_iam_role.node[0]" "${CLUSTER_NAME}-node-role"
+          import_role_if_needed "module.iam.aws_iam_role.vpc_cni[0]" "${CLUSTER_NAME}-vpc-cni"
+          import_role_if_needed "module.iam.aws_iam_role.ebs_csi[0]" "${CLUSTER_NAME}-ebs-csi"
+          import_role_if_needed "module.iam.aws_iam_role.lbc[0]" "${CLUSTER_NAME}-aws-lbc"
+          import_policy_if_needed "module.iam.aws_iam_policy.lbc[0]" "${CLUSTER_NAME}-aws-lbc-policy"
+          import_role_if_needed "module.iam.aws_iam_role.cluster_autoscaler[0]" "${CLUSTER_NAME}-cluster-autoscaler"
+          import_policy_if_needed "module.iam.aws_iam_policy.cluster_autoscaler[0]" "${CLUSTER_NAME}-cluster-autoscaler-policy"
           import_role_if_needed "module.github_oidc.aws_iam_role.github_actions" "${PROJECT}-github-actions-${ENVIRONMENT}"
           import_policy_if_needed "module.github_oidc.aws_iam_policy.terraform_state" "${PROJECT}-github-actions-tfstate-${ENVIRONMENT}"
+          import_kms_alias_if_needed "aws_kms_alias.eks" "alias/${CLUSTER_NAME}"
 
       - name: Bootstrap ECR & Build App Image
         id: build_app
