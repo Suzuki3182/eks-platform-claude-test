@@ -39,3 +39,10 @@ temp/
 # CI/CD artifacts
 artifacts/
 .github/workflows/*.log
+
+# Node build/dependencies
+app/node_modules/
+app/dist/
+
+# Local secrets
+kms-key.json
