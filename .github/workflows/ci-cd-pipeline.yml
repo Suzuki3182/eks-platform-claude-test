@@ -419,6 +419,66 @@ jobs:
           import_role_if_needed "module.iam.aws_iam_role.cluster_autoscaler[0]" "${CLUSTER_NAME}-cluster-autoscaler"
           import_policy_if_needed "module.iam.aws_iam_policy.cluster_autoscaler[0]" "${CLUSTER_NAME}-cluster-autoscaler-policy"
 
+      - name: Import existing OIDC and KMS artifacts into Terraform state (test)
+        run: |
+          set -euo pipefail
+
+          TF_DIR="terraform/environments/test"
+
+          import_if_needed() {
+            local tf_addr="$1"
+            local import_id="$2"
+
+            if [[ -z "$import_id" ]]; then
+              return 0
+            fi
+
+            if terraform -chdir="$TF_DIR" state show "$tf_addr" >/dev/null 2>&1; then
+              echo "State already contains $tf_addr"
+              return 0
+            fi
+
+            echo "Importing $import_id into $tf_addr"
+            set +e
+            import_output=$(terraform -chdir="$TF_DIR" import "$tf_addr" "$import_id" 2>&1)
+            import_exit=$?
+            set -e
+
+            if [[ $import_exit -ne 0 ]]; then
+              echo "$import_output"
+              if echo "$import_output" | grep -q "Resource already managed by Terraform"; then
+                echo "Import skipped: $tf_addr already managed in state."
+                return 0
+              fi
+              return $import_exit
+            fi
+          }
+
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          PROJECT=$(awk -F'=' '/^project/{gsub(/[ "\t]/, "", $2); print $2}' "$TF_DIR/terraform.tfvars")
+          ENVIRONMENT=$(awk -F'=' '/^environment/{gsub(/[ "\t]/, "", $2); print $2}' "$TF_DIR/terraform.tfvars")
+          CLUSTER_NAME="${PROJECT}-${ENVIRONMENT}"
+
+          OIDC_PROVIDER_ARN=$(aws iam list-open-id-connect-providers --query 'OpenIDConnectProviderList[].Arn' --output text | tr '\t' '\n' | while read -r arn; do
+            if [[ -n "$arn" ]] && aws iam get-open-id-connect-provider --open-id-connect-provider-arn "$arn" --query 'Url' --output text 2>/dev/null | grep -qx 'token.actions.githubusercontent.com'; then
+              echo "$arn"
+              break
+            fi
+          done)
+
+          TFSTATE_POLICY_ARN=$(aws iam list-policies --scope Local --query "Policies[?PolicyName=='${PROJECT}-github-actions-tfstate-${ENVIRONMENT}'].Arn | [0]" --output text)
+          GITHUB_ACTIONS_ROLE_NAME="${PROJECT}-github-actions-${ENVIRONMENT}"
+
+          import_if_needed "module.github_oidc.aws_iam_openid_connect_provider.github_actions[0]" "$OIDC_PROVIDER_ARN"
+          import_if_needed "module.github_oidc.aws_iam_role.github_actions" "$GITHUB_ACTIONS_ROLE_NAME"
+          if [[ -n "$TFSTATE_POLICY_ARN" && "$TFSTATE_POLICY_ARN" != "None" ]]; then
+            import_if_needed "module.github_oidc.aws_iam_policy.terraform_state" "$TFSTATE_POLICY_ARN"
+          fi
+
+          if aws kms describe-key --key-id "alias/${CLUSTER_NAME}" >/dev/null 2>&1; then
+            import_if_needed "aws_kms_alias.eks" "alias/${CLUSTER_NAME}"
+          fi
+
       - name: Bootstrap ECR & Build App Image
         id: build_app
         run: |
@@ -575,16 +635,72 @@ jobs:
         id: apply
         if: steps.plan.outputs.has_changes == 'true' && steps.precheck_cluster.outputs.exists != 'true'
         run: |
+          PLAN_FILE="${{ steps.plan.outputs.plan_file }}"
+
           retry_apply() {
             local attempt=1
             local max_attempts=3
             while [[ $attempt -le $max_attempts ]]; do
               echo "Apply attempt $attempt/$max_attempts..."
-              terraform -chdir=terraform/environments/test apply \
-                -auto-approve \
-                "${{ steps.plan.outputs.plan_file }}" 2>&1 | tee apply_output.txt
+
+              if [[ -f "$PLAN_FILE" ]]; then
+                terraform -chdir=terraform/environments/test apply \
+                  -auto-approve \
+                  "$PLAN_FILE" 2>&1 | tee apply_output.txt
+              else
+                echo "Plan file not found ($PLAN_FILE). Falling back to direct apply."
+                terraform -chdir=terraform/environments/test apply \
+                  -auto-approve \
+                  -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
+                  -var="app_image_tag=${{ steps.build_app.outputs.image_tag }}" \
+                  2>&1 | tee apply_output.txt
+              fi
+
               apply_exit=${PIPESTATUS[0]}
               if [[ $apply_exit -eq 0 ]]; then return 0; fi
+
+              if grep -q "Saved plan is stale" apply_output.txt; then
+                echo "Saved plan became stale. Removing plan file and retrying with fresh direct apply."
+                rm -f "$PLAN_FILE"
+                ((attempt++))
+                continue
+              fi
+
+              if grep -q "Kubernetes cluster unreachable" apply_output.txt; then
+                echo "Kubernetes API unreachable from runner. Applying infra-only targets and deferring in-cluster resources."
+                terraform -chdir=terraform/environments/test apply \
+                  -auto-approve \
+                  -refresh=false \
+                  -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
+                  -var="app_image_tag=${{ steps.build_app.outputs.image_tag }}" \
+                  -target=aws_kms_key.eks \
+                  -target=aws_kms_alias.eks \
+                  -target=module.vpc \
+                  -target=module.iam_bootstrap \
+                  -target=module.github_oidc \
+                  -target=module.eks \
+                  -target=module.iam \
+                  -target=module.ecr \
+                  2>&1 | tee apply_output.txt
+                return ${PIPESTATUS[0]}
+              fi
+
+              if grep -qE "Unsupported Kubernetes minor version update|DeleteConflict: Cannot delete a policy attached to entities" apply_output.txt; then
+                echo "Detected immutable EKS version drift and/or IAM policy delete conflict. Applying safe targeted subset (excluding module.eks and module.github_oidc)."
+                terraform -chdir=terraform/environments/test apply \
+                  -auto-approve \
+                  -refresh=false \
+                  -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
+                  -var="app_image_tag=${{ steps.build_app.outputs.image_tag }}" \
+                  -target=aws_kms_key.eks \
+                  -target=aws_kms_alias.eks \
+                  -target=module.vpc \
+                  -target=module.iam_bootstrap \
+                  -target=module.iam \
+                  -target=module.ecr \
+                  2>&1 | tee apply_output.txt
+                return ${PIPESTATUS[0]}
+              fi
 
               # Retry only on transient errors
               if grep -qE "Error acquiring the state lock|RequestExpired|Throttling|rate exceeded|timeout" apply_output.txt; then
