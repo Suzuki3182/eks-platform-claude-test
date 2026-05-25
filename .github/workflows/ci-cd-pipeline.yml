@@ -371,6 +371,10 @@ jobs:
                 echo "Import skipped: $tf_addr is already managed in state."
                 return 0
               fi
+              if echo "$import_output" | grep -Eq "Invalid provider configuration|depends on values that cannot be determined until apply"; then
+                echo "Import skipped: provider config depends on values not yet known until apply."
+                return 0
+              fi
               return $import_exit
             fi
           }
@@ -400,6 +404,10 @@ jobs:
               echo "$import_output"
               if echo "$import_output" | grep -q "Resource already managed by Terraform"; then
                 echo "Import skipped: $tf_addr is already managed in state."
+                return 0
+              fi
+              if echo "$import_output" | grep -Eq "Invalid provider configuration|depends on values that cannot be determined until apply"; then
+                echo "Import skipped: provider config depends on values not yet known until apply."
                 return 0
               fi
               return $import_exit
@@ -996,6 +1004,10 @@ jobs:
                 echo "Import skipped: $tf_addr already managed."
                 return 0
               fi
+              if echo "$import_output" | grep -Eq "Invalid provider configuration|depends on values that cannot be determined until apply"; then
+                echo "Import skipped: provider config depends on values not yet known until apply."
+                return 0
+              fi
               return $import_exit
             fi
           }
@@ -1024,6 +1036,10 @@ jobs:
               echo "$import_output"
               if echo "$import_output" | grep -q "Resource already managed by Terraform"; then
                 echo "Import skipped: $tf_addr already managed."
+                return 0
+              fi
+              if echo "$import_output" | grep -Eq "Invalid provider configuration|depends on values that cannot be determined until apply"; then
+                echo "Import skipped: provider config depends on values not yet known until apply."
                 return 0
               fi
               return $import_exit
@@ -1696,6 +1712,10 @@ jobs:
                 echo "Import skipped: $tf_addr already managed."
                 return 0
               fi
+              if echo "$import_output" | grep -Eq "Invalid provider configuration|depends on values that cannot be determined until apply"; then
+                echo "Import skipped: provider config depends on values not yet known until apply."
+                return 0
+              fi
               return $import_exit
             fi
           }
@@ -1724,6 +1744,10 @@ jobs:
               echo "$import_output"
               if echo "$import_output" | grep -q "Resource already managed by Terraform"; then
                 echo "Import skipped: $tf_addr already managed."
+                return 0
+              fi
+              if echo "$import_output" | grep -Eq "Invalid provider configuration|depends on values that cannot be determined until apply"; then
+                echo "Import skipped: provider config depends on values not yet known until apply."
                 return 0
               fi
               return $import_exit
