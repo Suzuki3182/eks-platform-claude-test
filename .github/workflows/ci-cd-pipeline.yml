@@ -515,10 +515,8 @@ jobs:
           docker build \
             --build-arg APP_VERSION="${SHORT_TAG}" \
             -t "${ECR_URL}:${SHORT_TAG}" \
-            -t "${ECR_URL}:latest" \
             app/
           docker push "${ECR_URL}:${SHORT_TAG}"
-          docker push "${ECR_URL}:latest"
 
           echo "image_tag=${SHORT_TAG}" >> "$GITHUB_OUTPUT"
           echo "ecr_url=${ECR_URL}" >> "$GITHUB_OUTPUT"
@@ -1133,10 +1131,8 @@ jobs:
           docker build \
             --build-arg APP_VERSION="${SHORT_TAG}" \
             -t "${ECR_URL}:${SHORT_TAG}" \
-            -t "${ECR_URL}:latest" \
             app/
           docker push "${ECR_URL}:${SHORT_TAG}"
-          docker push "${ECR_URL}:latest"
 
           echo "image_tag=${SHORT_TAG}" >> "$GITHUB_OUTPUT"
           echo "ecr_url=${ECR_URL}" >> "$GITHUB_OUTPUT"
@@ -1895,10 +1891,8 @@ jobs:
           docker build \
             --build-arg APP_VERSION="${SHORT_TAG}" \
             -t "${ECR_URL}:${SHORT_TAG}" \
-            -t "${ECR_URL}:latest" \
             app/
           docker push "${ECR_URL}:${SHORT_TAG}"
-          docker push "${ECR_URL}:latest"
 
           echo "image_tag=${SHORT_TAG}" >> "$GITHUB_OUTPUT"
           echo "ecr_url=${ECR_URL}" >> "$GITHUB_OUTPUT"
