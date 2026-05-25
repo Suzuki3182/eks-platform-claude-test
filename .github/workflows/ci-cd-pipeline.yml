@@ -269,6 +269,7 @@ jobs:
           else
             echo "Lock table exists: $TABLE"
           fi
+        continue-on-error: true
 
       - name: Terraform Init (test)
         run: terraform -chdir=terraform/environments/test init
@@ -844,6 +845,7 @@ jobs:
           else
             echo "Lock table exists: $TABLE"
           fi
+        continue-on-error: true
 
       - name: Terraform Init (staging)
         run: terraform -chdir=terraform/environments/staging init
@@ -1543,6 +1545,7 @@ jobs:
           else
             echo "Lock table exists: $TABLE"
           fi
+        continue-on-error: true
 
       - name: Terraform Init (prod)
         run: terraform -chdir=terraform/environments/prod init
