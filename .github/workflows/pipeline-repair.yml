@@ -125,6 +125,47 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
 
+      - name: Parse failure context
+        id: failure_context
+        run: |
+          STAGE=$(jq -r '.stage // "unknown"' artifacts/failure-context.json 2>/dev/null || echo "unknown")
+          FAILURE_TYPE=$(jq -r '.failure_type // "UNKNOWN"' artifacts/failure-context.json 2>/dev/null || echo "UNKNOWN")
+
+          # Normalize stage aliases for workflow conditions
+          case "$STAGE" in
+            production) STAGE="prod" ;;
+            qa) STAGE="staging" ;;
+            dev) STAGE="test" ;;
+          esac
+
+          echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
+          echo "failure_type=$FAILURE_TYPE" >> "$GITHUB_OUTPUT"
+          echo "Failure context: stage=$STAGE failure_type=$FAILURE_TYPE"
+
+      - name: Configure AWS Credentials — test
+        if: steps.failure_context.outputs.stage == 'test'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TEST }}
+          role-session-name: PipelineRepair-Test-${{ github.run_id }}
+          aws-region: us-east-1
+
+      - name: Configure AWS Credentials — staging
+        if: steps.failure_context.outputs.stage == 'staging'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_STAGING }}
+          role-session-name: PipelineRepair-Staging-${{ github.run_id }}
+          aws-region: us-east-1
+
+      - name: Configure AWS Credentials — prod
+        if: steps.failure_context.outputs.stage == 'prod'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_PROD }}
+          role-session-name: PipelineRepair-Prod-${{ github.run_id }}
+          aws-region: us-east-1
+
       - name: Configure git
         run: |
           git config user.email "pipeline-repair@eks-platform.local"
@@ -153,10 +194,14 @@ jobs:
           echo "repair_exit=$?" >> "$GITHUB_OUTPUT"
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           GIT_USER_EMAIL: "pipeline-repair@eks-platform.local"
           GIT_USER_NAME: "Pipeline Repair Agent"
           MAX_CONSECUTIVE_REPAIRS: '3'
+          AWS_REGION: 'us-east-1'
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+          GITHUB_REPO: ${{ github.repository }}
         continue-on-error: true
 
       - name: Upload Repair Report

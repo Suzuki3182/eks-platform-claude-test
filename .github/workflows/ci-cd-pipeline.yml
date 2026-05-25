@@ -1386,6 +1386,47 @@ jobs:
           echo "status=$STATUS" >> "$GITHUB_OUTPUT"
           cat artifacts/agent-output.json
 
+      - name: Emit Failure Context (staging)
+        if: failure() || steps.emit.outputs.status == 'failure'
+        run: |
+          FAILED_STEP="unknown"
+          FAILURE_TYPE="UNKNOWN"
+
+          if [[ "${{ steps.apply.outcome }}" == "failure" ]]; then
+            FAILED_STEP="Terraform Apply (staging)"; FAILURE_TYPE="TF_APPLY"
+          elif [[ "${{ steps.healthcheck.outcome }}" == "failure" ]] || \
+               [[ "${{ steps.autoscaler.outcome }}" == "failure" ]] || \
+               [[ "${{ steps.dns.outcome }}" == "failure" ]] || \
+               [[ "${{ steps.ingress.outcome }}" == "failure" ]] || \
+               [[ "${{ steps.metrics.outcome }}" == "failure" ]] || \
+               [[ "${{ steps.app_validation.outcome }}" == "failure" ]] || \
+               [[ "${{ steps.private_validation.outcome }}" == "failure" ]]; then
+            FAILED_STEP="Staging Cluster Validation"; FAILURE_TYPE="K8S_HEALTH"
+          elif [[ "${{ steps.agent.outcome }}" == "failure" ]]; then
+            FAILED_STEP="Validation Agent"; FAILURE_TYPE="K8S_HEALTH"
+          fi
+
+          ERROR_OUTPUT=""
+          for f in apply_output.txt healthcheck_output.txt agent_output.txt; do
+            if [[ -f "$f" ]]; then
+              ERROR_OUTPUT+="\n--- $f ---\n"
+              ERROR_OUTPUT+="$(tail -n 80 "$f")"
+            fi
+          done
+
+          mkdir -p artifacts
+          cat > artifacts/failure-context.json << EOF
+          {
+            "stage": "staging",
+            "failed_step": "$FAILED_STEP",
+            "failure_type": "$FAILURE_TYPE",
+            "commit_sha": "${{ github.sha }}",
+            "run_id": "${{ github.run_id }}",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "error_output": $(printf '%s' "$ERROR_OUTPUT" | jq -Rs .)
+          }
+          EOF
+
       - name: Upload Staging Artifacts
         uses: actions/upload-artifact@v4
         if: always()
@@ -1397,6 +1438,14 @@ jobs:
             artifacts/CHANGELOG.md
             artifacts/changelog.json
           retention-days: 7
+
+      - name: Upload Failure Context (staging, for repair agent)
+        uses: actions/upload-artifact@v4
+        if: failure() || steps.emit.outputs.status == 'failure'
+        with:
+          name: failure-context
+          path: artifacts/failure-context.json
+          retention-days: 3
 
       - name: Rollback on Failure
         if: failure() && steps.apply.outcome == 'success'
@@ -1864,6 +1913,45 @@ jobs:
           echo "status=$STATUS" >> "$GITHUB_OUTPUT"
           cat artifacts/agent-output.json
 
+      - name: Emit Failure Context (production)
+        if: failure() || steps.emit.outputs.status == 'failure'
+        run: |
+          FAILED_STEP="unknown"
+          FAILURE_TYPE="UNKNOWN"
+
+          if [[ "${{ steps.security.outcome }}" == "failure" ]]; then
+            FAILED_STEP="Final Security Scan (prod)"; FAILURE_TYPE="SECURITY_BLOCK"
+          elif [[ "${{ steps.auto_approval.outcome }}" != "success" ]]; then
+            FAILED_STEP="Auto-Approval Engine"; FAILURE_TYPE="AUTO_APPROVAL"
+          elif [[ "${{ steps.apply.outcome }}" == "failure" ]]; then
+            FAILED_STEP="Terraform Apply (prod)"; FAILURE_TYPE="TF_APPLY"
+          elif [[ "${{ steps.healthcheck.outcome }}" == "failure" ]] || \
+               [[ "${{ steps.rollout.outcome }}" == "failure" ]] || \
+               [[ "${{ steps.agent.outcome }}" == "failure" ]]; then
+            FAILED_STEP="Production Cluster Validation"; FAILURE_TYPE="K8S_HEALTH"
+          fi
+
+          ERROR_OUTPUT=""
+          for f in apply_output.txt healthcheck_output.txt rollback_decision_output.txt agent_output.txt; do
+            if [[ -f "$f" ]]; then
+              ERROR_OUTPUT+="\n--- $f ---\n"
+              ERROR_OUTPUT+="$(tail -n 80 "$f")"
+            fi
+          done
+
+          mkdir -p artifacts
+          cat > artifacts/failure-context.json << EOF
+          {
+            "stage": "prod",
+            "failed_step": "$FAILED_STEP",
+            "failure_type": "$FAILURE_TYPE",
+            "commit_sha": "${{ github.sha }}",
+            "run_id": "${{ github.run_id }}",
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "error_output": $(printf '%s' "$ERROR_OUTPUT" | jq -Rs .)
+          }
+          EOF
+
       - name: Upload Production Artifacts
         uses: actions/upload-artifact@v4
         if: always()
@@ -1876,6 +1964,14 @@ jobs:
             artifacts/auto-approval-engine.log
             artifacts/rollback-decision-report.json
           retention-days: 30
+
+      - name: Upload Failure Context (production, for repair agent)
+        uses: actions/upload-artifact@v4
+        if: failure() || steps.emit.outputs.status == 'failure'
+        with:
+          name: failure-context
+          path: artifacts/failure-context.json
+          retention-days: 3
 
       - name: Post-Deploy Rollout Monitoring
         id: rollback_agent

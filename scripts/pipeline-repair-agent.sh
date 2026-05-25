@@ -78,6 +78,23 @@ git config user.name "${GIT_USER_NAME:-Pipeline Repair Agent}"
 FIXED=false
 FIX_DESCRIPTION=""
 
+stage_to_env() {
+  local stage="$1"
+  case "$stage" in
+    build|test|dev) echo "test" ;;
+    staging|qa) echo "staging" ;;
+    prod|production|live) echo "prod" ;;
+    *) echo "" ;;
+  esac
+}
+
+retrigger_pipeline_only() {
+  local reason="$1"
+  FIXED=true
+  FIX_DESCRIPTION="$reason"
+  log "Prepared pipeline retrigger without source changes: $reason"
+}
+
 # ── Claude API helper ─────────────────────────────────────────────────────────
 ask_claude() {
   local prompt="$1"
@@ -300,6 +317,101 @@ Rules:
   done
 }
 
+# ── Fix: Terraform apply/runtime AWS auth failures ───────────────────────────
+fix_tf_apply() {
+  local env_name
+  env_name=$(stage_to_env "$STAGE")
+  if [[ -z "$env_name" ]]; then
+    log "Cannot map stage '$STAGE' to Terraform environment"
+    return
+  fi
+
+  local tf_dir="terraform/environments/${env_name}"
+  if [[ ! -d "$tf_dir" ]]; then
+    log "Terraform directory not found: $tf_dir"
+    return
+  fi
+
+  log "Fix: Running Terraform apply diagnostics for $env_name"
+
+  if [[ -x scripts/oidc-preflight-check.sh ]]; then
+    if ! scripts/oidc-preflight-check.sh >/tmp/oidc_preflight.log 2>&1; then
+      log "OIDC preflight failed; attempting OIDC auto-reconfiguration"
+      if [[ -x scripts/reconfigure-aws-oidc.sh ]]; then
+        AUTO_SET_SECRETS=true scripts/reconfigure-aws-oidc.sh >/tmp/oidc_reconfigure.log 2>&1 || true
+      fi
+    fi
+  fi
+
+  terraform -chdir="$tf_dir" init >/tmp/repair_tf_init.log 2>&1 || true
+
+  PLAN_OUTPUT=$(terraform -chdir="$tf_dir" plan \
+    -var="aws_account_id=${AWS_ACCOUNT_ID:-}" \
+    -var="app_image_tag=latest" \
+    -no-color -detailed-exitcode 2>&1 || true)
+
+  if echo "$PLAN_OUTPUT" | grep -q "Error acquiring the state lock"; then
+    LOCK_ID=$(echo "$PLAN_OUTPUT" | awk '/^│   ID:/{print $3; exit}' | tr -d '\r')
+    if [[ -n "$LOCK_ID" ]]; then
+      log "Detected stale lock $LOCK_ID; attempting force-unlock"
+      terraform -chdir="$tf_dir" force-unlock -force "$LOCK_ID" >/tmp/repair_force_unlock.log 2>&1 || true
+      PLAN_OUTPUT=$(terraform -chdir="$tf_dir" plan \
+        -var="aws_account_id=${AWS_ACCOUNT_ID:-}" \
+        -var="app_image_tag=latest" \
+        -no-color -detailed-exitcode 2>&1 || true)
+    fi
+  fi
+
+  if echo "$PLAN_OUTPUT" | grep -q "Error:"; then
+    log "Terraform plan still failing after repair attempt"
+    return
+  fi
+
+  retrigger_pipeline_only "terraform apply preflight self-repair"
+}
+
+# ── Fix: Kubernetes health failures ───────────────────────────────────────────
+fix_k8s_health() {
+  local env_name
+  env_name=$(stage_to_env "$STAGE")
+  if [[ -z "$env_name" ]]; then
+    log "Cannot map stage '$STAGE' to Kubernetes environment"
+    return
+  fi
+
+  local tfvars_file="terraform/environments/${env_name}/terraform.tfvars"
+  if [[ ! -f "$tfvars_file" ]]; then
+    log "Missing tfvars file to resolve cluster name: $tfvars_file"
+    return
+  fi
+
+  PROJECT=$(awk -F'=' '/^project/{gsub(/[ "\t]/, "", $2); print $2}' "$tfvars_file")
+  ENVIRONMENT=$(awk -F'=' '/^environment/{gsub(/[ "\t]/, "", $2); print $2}' "$tfvars_file")
+  CLUSTER_NAME="${PROJECT}-${ENVIRONMENT}"
+
+  if [[ -z "$CLUSTER_NAME" || "$CLUSTER_NAME" == "-" ]]; then
+    log "Unable to resolve cluster name for $env_name"
+    return
+  fi
+
+  log "Fix: Running self-heal and health recheck for cluster=$CLUSTER_NAME"
+
+  aws eks update-kubeconfig --region "${AWS_REGION:-us-east-1}" --name "$CLUSTER_NAME" >/tmp/repair_kubeconfig.log 2>&1 || true
+
+  if [[ -x scripts/cluster-selfheal-agent.sh ]]; then
+    SELFHEAL_DRY_RUN=false scripts/cluster-selfheal-agent.sh "$CLUSTER_NAME" "${AWS_REGION:-us-east-1}" >/tmp/repair_selfheal.log 2>&1 || true
+  fi
+
+  if [[ -x scripts/k8s-healthcheck.sh ]]; then
+    if scripts/k8s-healthcheck.sh "$CLUSTER_NAME" "${AWS_REGION:-us-east-1}" >/tmp/repair_healthcheck.log 2>&1; then
+      retrigger_pipeline_only "k8s self-heal remediation"
+      return
+    fi
+  fi
+
+  log "Kubernetes health check still failing after self-heal attempt"
+}
+
 # ── Fix: Security BLOCK findings ──────────────────────────────────────────────
 fix_security_block() {
   log "Fix: Analyzing security BLOCK findings with Claude API..."
@@ -378,6 +490,8 @@ case "$FAILURE_TYPE" in
   SHELLCHECK)      fix_shellcheck ;;
   TF_VALIDATE)     fix_tf_validate ;;
   TF_LINT)         fix_tflint ;;
+  TF_APPLY)        fix_tf_apply ;;
+  K8S_HEALTH)      fix_k8s_health ;;
   NPM_BUILD|TS_BUILD) fix_npm_build ;;
   SECURITY_BLOCK)  fix_security_block ;;
   TF_FORMAT,SHELLCHECK|SHELLCHECK,TF_FORMAT)
@@ -409,7 +523,12 @@ Repair attempt: $((CONSECUTIVE_REPAIRS + 1))/${MAX_REPAIRS}
 
 Co-Authored-By: Pipeline Repair Agent <noreply@anthropic.com>"
 
-  git commit -m "$COMMIT_MSG"
+  if git diff --cached --quiet && git diff --quiet; then
+    git commit --allow-empty -m "$COMMIT_MSG"
+  else
+    git add -A
+    git commit -m "$COMMIT_MSG"
+  fi
   git push origin HEAD
 
   log "Fix committed and pushed. New pipeline run will start automatically."
