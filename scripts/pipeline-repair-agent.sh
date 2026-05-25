@@ -317,6 +317,32 @@ Rules:
   done
 }
 
+# ── Fix: AWS OIDC bootstrap/auth failures ────────────────────────────────────
+fix_aws_oidc() {
+  log "Fix: Attempting OIDC provider and role remediation"
+
+  if [[ ! -x scripts/reconfigure-aws-oidc.sh ]]; then
+    log "OIDC repair script not found or not executable"
+    return
+  fi
+
+  if [[ -z "${AWS_ACCOUNT_ID:-}" ]]; then
+    log "AWS_ACCOUNT_ID not provided; cannot safely run OIDC reconfiguration"
+    return
+  fi
+
+  if [[ -z "${GITHUB_REPO:-}" ]]; then
+    log "GITHUB_REPO not provided; cannot safely run OIDC reconfiguration"
+    return
+  fi
+
+  if AUTO_SET_SECRETS=true scripts/reconfigure-aws-oidc.sh >/tmp/repair_oidc.log 2>&1; then
+    retrigger_pipeline_only "aws oidc bootstrap auto-repair"
+  else
+    log "OIDC reconfiguration script failed"
+  fi
+}
+
 # ── Fix: Terraform apply/runtime AWS auth failures ───────────────────────────
 fix_tf_apply() {
   local env_name
@@ -486,6 +512,7 @@ Rules:
 log "Dispatching fix for failure type: $FAILURE_TYPE"
 
 case "$FAILURE_TYPE" in
+  AWS_OIDC)       fix_aws_oidc ;;
   TF_FORMAT)       fix_tf_format ;;
   SHELLCHECK)      fix_shellcheck ;;
   TF_VALIDATE)     fix_tf_validate ;;

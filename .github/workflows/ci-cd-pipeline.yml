@@ -214,6 +214,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure AWS Credentials (OIDC)
+        id: aws_auth
 
 
         uses: aws-actions/configure-aws-credentials@v4
@@ -727,7 +728,9 @@ jobs:
         run: |
           FAILED_STEP="unknown"
           FAILURE_TYPE="UNKNOWN"
-          if [[ "${{ steps.security_triage.outcome }}" != "success" ]]; then
+          if [[ "${{ steps.aws_auth.outcome }}" == "failure" ]]; then
+            FAILED_STEP="Configure AWS Credentials (OIDC)"; FAILURE_TYPE="AWS_OIDC"
+          elif [[ "${{ steps.security_triage.outcome }}" != "success" ]]; then
             FAILED_STEP="Security Triage Agent"; FAILURE_TYPE="SECURITY_BLOCK"
           elif [[ "${{ steps.apply.outcome }}" == "failure" ]]; then
             FAILED_STEP="Terraform Apply (test)"; FAILURE_TYPE="TF_APPLY"
@@ -796,6 +799,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure AWS Credentials (OIDC)
+        id: aws_auth
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_STAGING }}
@@ -1392,7 +1396,9 @@ jobs:
           FAILED_STEP="unknown"
           FAILURE_TYPE="UNKNOWN"
 
-          if [[ "${{ steps.apply.outcome }}" == "failure" ]]; then
+          if [[ "${{ steps.aws_auth.outcome }}" == "failure" ]]; then
+            FAILED_STEP="Configure AWS Credentials (OIDC)"; FAILURE_TYPE="AWS_OIDC"
+          elif [[ "${{ steps.apply.outcome }}" == "failure" ]]; then
             FAILED_STEP="Terraform Apply (staging)"; FAILURE_TYPE="TF_APPLY"
           elif [[ "${{ steps.healthcheck.outcome }}" == "failure" ]] || \
                [[ "${{ steps.autoscaler.outcome }}" == "failure" ]] || \
@@ -1477,6 +1483,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure AWS Credentials (OIDC)
+        id: aws_auth
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_PROD }}
@@ -1919,7 +1926,9 @@ jobs:
           FAILED_STEP="unknown"
           FAILURE_TYPE="UNKNOWN"
 
-          if [[ "${{ steps.security.outcome }}" == "failure" ]]; then
+          if [[ "${{ steps.aws_auth.outcome }}" == "failure" ]]; then
+            FAILED_STEP="Configure AWS Credentials (OIDC)"; FAILURE_TYPE="AWS_OIDC"
+          elif [[ "${{ steps.security.outcome }}" == "failure" ]]; then
             FAILED_STEP="Final Security Scan (prod)"; FAILURE_TYPE="SECURITY_BLOCK"
           elif [[ "${{ steps.auto_approval.outcome }}" != "success" ]]; then
             FAILED_STEP="Auto-Approval Engine"; FAILURE_TYPE="AUTO_APPROVAL"
