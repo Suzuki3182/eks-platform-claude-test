@@ -1115,7 +1115,8 @@ jobs:
           IMAGE_TAG="${{ github.sha }}"
           SHORT_TAG="${IMAGE_TAG:0:8}"
           AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          ECR_URL="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPO}"
+          ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          ECR_URL="${ECR_REGISTRY}/${ECR_REPO}"
 
           if ! aws ecr describe-repositories --repository-names "$ECR_REPO" --region "$AWS_REGION" 2>/dev/null; then
             echo "ECR repository not found. Creating via Terraform target..."
@@ -1123,16 +1124,27 @@ jobs:
               -target=module.ecr \
               -var="aws_account_id=${{ secrets.AWS_ACCOUNT_ID }}" \
               -auto-approve
+
+            # Wait for repository propagation before attempting login/push.
+            aws ecr wait repository-exists --repository-names "$ECR_REPO" --region "$AWS_REGION"
           fi
 
           aws ecr get-login-password --region "$AWS_REGION" | \
-            docker login --username AWS --password-stdin "$ECR_URL"
+            docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
-          docker build \
-            --build-arg APP_VERSION="${SHORT_TAG}" \
-            -t "${ECR_URL}:${SHORT_TAG}" \
-            app/
-          docker push "${ECR_URL}:${SHORT_TAG}"
+          # Immutable tags cannot be overwritten; reuse if the commit tag already exists.
+          if aws ecr describe-images \
+            --repository-name "$ECR_REPO" \
+            --image-ids "imageTag=${SHORT_TAG}" \
+            --region "$AWS_REGION" >/dev/null 2>&1; then
+            echo "Image tag ${SHORT_TAG} already exists in ${ECR_REPO}; skipping build/push."
+          else
+            docker build \
+              --build-arg APP_VERSION="${SHORT_TAG}" \
+              -t "${ECR_URL}:${SHORT_TAG}" \
+              app/
+            docker push "${ECR_URL}:${SHORT_TAG}"
+          fi
 
           echo "image_tag=${SHORT_TAG}" >> "$GITHUB_OUTPUT"
           echo "ecr_url=${ECR_URL}" >> "$GITHUB_OUTPUT"
